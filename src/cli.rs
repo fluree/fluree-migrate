@@ -52,3 +52,84 @@ pub mod opt {
         pub is_create_ledger: bool,
     }
 }
+
+pub mod temp_files {
+    use std::fs::{self, File, OpenOptions};
+    use std::io::{self, Read, Write};
+    use std::path::{Path, PathBuf};
+
+    use serde_json::Value;
+
+    pub struct TempFile {
+        directory: PathBuf,
+        current_file: Option<File>,
+        current_file_size: u64,
+        file_counter: u32,
+    }
+
+    impl TempFile {
+        pub fn new(directory: &Path) -> io::Result<Self> {
+            fs::create_dir_all(directory)?;
+            Ok(TempFile {
+                directory: directory.to_path_buf(),
+                current_file: None,
+                current_file_size: 0,
+                file_counter: 0,
+            })
+        }
+
+        pub fn write(&mut self, collection_name: &str, data: &Vec<Value>) -> io::Result<()> {
+            let pretty_string = serde_json::to_string_pretty(data).unwrap();
+            let bytes_data = pretty_string.as_bytes();
+            self.create_new_file(collection_name)?;
+            if let Some(file) = &mut self.current_file {
+                file.write_all(bytes_data)?;
+                self.current_file_size += data.len() as u64;
+            }
+            Ok(())
+        }
+
+        fn create_new_file(&mut self, collection_name: &str) -> io::Result<()> {
+            let file_name = format!("{}__{}", self.file_counter, collection_name);
+            let file_path = self.directory.join(&file_name);
+            self.file_counter += 1;
+            self.current_file_size = 0;
+            self.current_file = Some(
+                OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .open(file_path)?,
+            );
+            Ok(())
+        }
+
+        pub fn get_files(&self) -> io::Result<Vec<PathBuf>> {
+            let mut files: Vec<PathBuf> = fs::read_dir(&self.directory)?
+                .filter_map(|entry| {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        if path.is_file() {
+                            Some(path)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            files.sort(); // Sort the files to read them in order
+
+            Ok(files.to_owned())
+
+            // for file in files {
+            //     let mut file_data = Vec::new();
+            //     File::open(&file)?.read_to_end(&mut file_data)?;
+            //     data.push(file_data);
+            // }
+
+            // Ok(data)
+        }
+    }
+}

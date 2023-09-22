@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 chrono = "0.4.30"
 crossterm = "0.27.0"
+deepsize = "0.2.0"
 dialoguer = { version = "0.10.4", features = ["completion"] }
 indicatif = "0.17.6"
 reqwest = { version = "0.11.16", features = ["rustls-tls"], default-features = false }

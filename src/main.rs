@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, prelude::*, stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use structopt::StructOpt;
 
@@ -19,7 +19,9 @@ mod fluree;
 mod lib;
 
 pub use cli::opt::Opt;
+use cli::temp_files::TempFile;
 pub use console::console::{pretty_print, ERROR_COLOR};
+pub use fluree::db::get_db_name;
 pub use fluree::query::SCHEMA_QUERY;
 pub use lib::functions::{
     add_prefix, capitalize, instant_to_iso_string, remove_namespace, remove_underscore,
@@ -250,6 +252,10 @@ async fn main() -> Result<(), reqwest::Error> {
         "rdfs".to_string(),
         "http://www.w3.org/2000/01/rdf-schema#".to_string(),
     );
+    context.insert(
+        "rdf".to_string(),
+        "http://www.w3.org/1999/02/22-rdf-syntax-ns#".to_string(),
+    );
 
     let mut canonical_classes: HashMap<String, Value> = HashMap::new();
     let mut canonical_properties: HashMap<String, Value> = HashMap::new();
@@ -389,12 +395,13 @@ async fn main() -> Result<(), reqwest::Error> {
                     let type_value = item["type"].as_str().unwrap();
                     match type_value {
                         "float" | "int" | "instant" | "boolean" | "long" | "string" | "ref" => {
-                            shacl_property["sh:datatype"] = match type_value {
+                            let data_type = match type_value {
                                 "int" => Value::String("xsd:integer".to_string()),
                                 "instant" => Value::String("xsd:dateTime".to_string()),
                                 "ref" => Value::String("xsd:anyURI".to_string()),
                                 _ => Value::String(format!("xsd:{}", type_value)),
                             };
+                            shacl_property["sh:datatype"] = json!({ "@id": data_type })
                         }
                         "tag" => {
                             // TODO: Figure out how to handle tag types
@@ -463,28 +470,23 @@ async fn main() -> Result<(), reqwest::Error> {
 
     let query_classes: Vec<String> = canonical_classes.keys().map(|key| key.to_owned()).collect();
 
-    let mut results_map = serde_json::Map::new();
-    if opt.is_create_ledger.clone() {
-        if opt.url.is_some() {
-            let url = opt.url.unwrap();
-            // I need to parse the URL for the ledger name
-            // the ledger name is the last section like "ledger/name" from the url
-            // So a url like https://api.dev.flur.ee/fdb/fluree/387028092977569 would be "fluree/387028092977569"
-            let mut url_parts = url
-                .split("/")
-                .collect::<Vec<&str>>()
-                .into_iter()
-                .rev()
-                .take(2);
-            let db_name = url_parts.next().unwrap();
-            let network_name = url_parts.next().unwrap();
-            results_map.insert(
-                "ledger".to_string(),
-                json!(format!("{}/{}", network_name, db_name)),
-            );
-        }
-        results_map.insert(
-            "defaultContext".to_string(),
+    let mut vocab_results_map = serde_json::Map::new();
+    if opt.url.is_some() {
+        let url = opt.url.unwrap();
+        let (network_name, db_name) = get_db_name(&url);
+        vocab_results_map.insert(
+            "@id".to_string(),
+            json!(format!("{}/{}", network_name, db_name)),
+        );
+    }
+    let mut data_results_map = vocab_results_map.clone();
+    if opt.is_create_ledger {
+        vocab_results_map.insert(
+            "@context".to_string(),
+            json!({ "f": "https://ns.flur.ee/ledger#"}),
+        );
+        vocab_results_map.insert(
+            "f:defaultContext".to_string(),
             Value::Object(
                 context
                     .iter()
@@ -492,9 +494,8 @@ async fn main() -> Result<(), reqwest::Error> {
                     .collect(),
             ),
         );
-        results_map.insert("txn".to_string(), Value::Array(results));
     } else {
-        results_map.insert(
+        vocab_results_map.insert(
             "@context".to_string(),
             Value::Object(
                 context
@@ -503,16 +504,19 @@ async fn main() -> Result<(), reqwest::Error> {
                     .collect(),
             ),
         );
-        results_map.insert("@graph".to_string(), Value::Array(results));
     }
+    data_results_map.insert(
+        "@context".to_string(),
+        Value::Object(
+            context
+                .iter()
+                .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+                .collect(),
+        ),
+    );
+    vocab_results_map.insert("@graph".to_string(), Value::Array(results));
+    data_results_map.insert("@graph".to_string(), json!([]));
 
-    /*
-    Now I'm going to iterate through the query_classes and create at least one query for each one.
-    The query will be like { "select": ["*"], "from": "{{class_name}}", "opts": { "limit": 1000 } }
-    If the length of the result is 1000, then I will issue another query like this
-    { "select": ["*"], "from": "{{class_name}}", "opts": { "limit": 1000, offset": 1000 } }
-    and so on until the length of the result is less than 1000
-     */
     let client = reqwest::Client::new();
     let mut request_headers = HeaderMap::new();
     request_headers.insert("Content-Type", "application/json".parse().unwrap());
@@ -556,7 +560,8 @@ async fn main() -> Result<(), reqwest::Error> {
                     "from": "{}",
                     "opts": {{
                         "compact": true,
-                        "limit": 1000,
+                        "limit": 2000,
+                        "fuel": 9999999999,
                         "offset": {}
                     }}
                 }}"#,
@@ -572,6 +577,7 @@ async fn main() -> Result<(), reqwest::Error> {
             let response = response_result.unwrap().text().await.unwrap();
             let response: Value = serde_json::from_str(&response).unwrap();
             let response = response.as_array().unwrap();
+
             if response.len() == 0 {
                 break;
             }
@@ -579,9 +585,25 @@ async fn main() -> Result<(), reqwest::Error> {
                 0 => response.to_owned(),
                 _ => results.into_iter().chain(response.to_owned()).collect(),
             };
-            offset += 1000;
+            // let results_length = results.len();
+            // println!(
+            //     "In collection {}; data_size is {}",
+            //     class_name,
+            //     results.len()
+            // );
+            // if results_length > 100_000 {
+            //     temp_file.write(&class_name, &results).expect(
+            //         format!("Issue writing file for {} at offset {}", class_name, offset).as_str(),
+            //     );
+            //     results.clear();
+            // }
+            offset += 2000;
         }
         let mut vec_parsed_results = Vec::new();
+        // let files = temp_file.get_files().expect("Could not get files");
+
+        // p
+
         for result in results {
             let mut parsed_result: HashMap<String, Value> = HashMap::new();
             let string_id: String = result["_id"].to_string();
@@ -601,9 +623,9 @@ async fn main() -> Result<(), reqwest::Error> {
                     let shacl_shape = canonical_class_shacl_shapes.get(&class_name).unwrap();
                     let shacl_properties = shacl_shape.get("sh:property").unwrap();
                     let is_datetime = match shacl_properties.as_array().unwrap().iter().find(|&x| {
-                        let shacl_path = &x["sh:path"];
+                        let shacl_path = &x["sh:path"]["@id"];
                         let y = Value::String("xsd:dateTime".to_string());
-                        shacl_path == key && x["sh:datatype"] == y
+                        shacl_path == key && x["sh:datatype"]["@id"] == y
                     }) {
                         Some(_) => true,
                         None => false,
@@ -622,37 +644,63 @@ async fn main() -> Result<(), reqwest::Error> {
             vec_parsed_results.push(json!(parsed_result));
         }
 
-        let key = if opt.is_create_ledger {
-            "txn"
-        } else {
-            "@graph"
-        };
-        results_map.entry(key.to_string()).and_modify(|e| {
-            if let Value::Array(array) = e {
-                array.extend(vec_parsed_results);
-            }
-        });
+        data_results_map
+            .entry("@graph".to_string())
+            .and_modify(|e| {
+                if let Value::Array(array) = e {
+                    array.extend(vec_parsed_results);
+                }
+            });
     }
 
     pb.finish_and_clear();
 
     match opt.output.clone() {
         Some(output) => {
-            let mut file = File::create(output).expect("Could not create file");
-            file.write_all(
-                serde_json::to_string_pretty(&results_map)
-                    .unwrap()
-                    .as_bytes(),
-            )
-            .expect("Could not write to file");
+            let output = output.clone();
+            let output = output.to_str().unwrap();
+            let path = PathBuf::from(output);
+            std::fs::create_dir_all(&output).unwrap();
+            let mut schema_file = File::create(path.join("vocab.jsonld")).unwrap();
+            let mut data_file = File::create(path.join("data.jsonld")).unwrap();
+            let mut schema_writer = io::BufWriter::new(&mut schema_file);
+            let mut data_writer = io::BufWriter::new(&mut data_file);
+            schema_writer
+                .write_all(
+                    serde_json::to_string_pretty(&vocab_results_map)
+                        .unwrap()
+                        .as_bytes(),
+                )
+                .expect("Could not write to file");
+            data_writer
+                .write_all(
+                    serde_json::to_string_pretty(&data_results_map)
+                        .unwrap()
+                        .as_bytes(),
+                )
+                .expect("Could not write to file");
+            // let mut file = File::create(output).expect("Could not create file");
+            // file.write_all(
+            //     serde_json::to_string_pretty(&results_map)
+            //         .unwrap()
+            //         .as_bytes(),
+            // )
+            // .expect("Could not write to file");
         }
         None => {
-            println!("{}", serde_json::to_string_pretty(&results_map).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&vocab_results_map).unwrap()
+            );
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&data_results_map).unwrap()
+            );
         }
     }
 
     let finish_line = match opt.output {
-        Some(output) => format!("to {} ", output.to_str().unwrap()),
+        Some(output) => format!("to {}/ ", output.to_str().unwrap()),
         None => "".to_string(),
     };
     println!(

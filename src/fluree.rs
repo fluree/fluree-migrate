@@ -22,3 +22,17 @@ pub mod query {
     }
 }"#;
 }
+
+pub mod db {
+    pub fn get_db_name(url: &str) -> (String, String) {
+        let mut url_parts = url
+            .split("/")
+            .collect::<Vec<&str>>()
+            .into_iter()
+            .rev()
+            .take(2);
+        let db_name = url_parts.next().unwrap();
+        let network_name = url_parts.next().unwrap();
+        (network_name.to_string(), db_name.to_string())
+    }
+}
