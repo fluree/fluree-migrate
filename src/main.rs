@@ -543,6 +543,9 @@ async fn main() -> Result<(), reqwest::Error> {
     );
     pb.set_prefix("Transforming Fluree v2 Entities");
 
+    let temp_dir = Path::new(".temp_data");
+    let mut temp_file = TempFile::new(temp_dir).expect("Could not create temp file");
+
     for class_name in query_classes {
         let mut results: Vec<Value> = Vec::new();
         let mut offset: u32 = 0;
@@ -579,79 +582,84 @@ async fn main() -> Result<(), reqwest::Error> {
             let response = response.as_array().unwrap();
 
             if response.len() == 0 {
+                println!("Got to end of collection: {}", class_name);
+                temp_file
+                    .write(&class_name, &results)
+                    .expect(format!("Issue writing file for {}", class_name).as_str());
+                results.clear();
                 break;
             }
             results = match offset {
                 0 => response.to_owned(),
                 _ => results.into_iter().chain(response.to_owned()).collect(),
             };
-            // let results_length = results.len();
-            // println!(
-            //     "In collection {}; data_size is {}",
-            //     class_name,
-            //     results.len()
-            // );
-            // if results_length > 100_000 {
-            //     temp_file.write(&class_name, &results).expect(
-            //         format!("Issue writing file for {} at offset {}", class_name, offset).as_str(),
-            //     );
-            //     results.clear();
-            // }
+            let results_length = results.len();
+            println!(
+                "In collection {}; data_size is {}",
+                class_name,
+                results.len()
+            );
+            if results_length > 100_000 {
+                temp_file.write(&class_name, &results).expect(
+                    format!("Issue writing file for {} at offset {}", class_name, offset).as_str(),
+                );
+                results.clear();
+            }
             offset += 2000;
         }
-        let mut vec_parsed_results = Vec::new();
-        // let files = temp_file.get_files().expect("Could not get files");
-
-        // p
-
-        for result in results {
-            let mut parsed_result: HashMap<String, Value> = HashMap::new();
-            let string_id: String = result["_id"].to_string();
-            parsed_result.insert("@id".to_string(), json!(string_id));
-            parsed_result.insert(
-                "@type".to_string(),
-                canonical_classes
-                    .get(&class_name)
-                    .unwrap()
-                    .get("@id")
-                    .unwrap()
-                    .to_owned(),
-            );
-            for (key, value) in result.as_object().unwrap() {
-                if let Some(canonical_property) = canonical_properties.get(key) {
-                    let key = canonical_property.get("@id").unwrap();
-                    let shacl_shape = canonical_class_shacl_shapes.get(&class_name).unwrap();
-                    let shacl_properties = shacl_shape.get("sh:property").unwrap();
-                    let is_datetime = match shacl_properties.as_array().unwrap().iter().find(|&x| {
-                        let shacl_path = &x["sh:path"]["@id"];
-                        let y = Value::String("xsd:dateTime".to_string());
-                        shacl_path == key && x["sh:datatype"]["@id"] == y
-                    }) {
-                        Some(_) => true,
-                        None => false,
-                    };
-                    let value = match is_datetime {
-                        true => json!(instant_to_iso_string(value.as_i64().unwrap())),
-                        false => value.to_owned(),
-                    };
-                    let key_string = match key {
-                        Value::String(value) => value.to_owned(),
-                        _ => key.to_string(),
-                    };
-                    parsed_result.insert(key_string, represent_fluree_value(&value));
-                }
-            }
-            vec_parsed_results.push(json!(parsed_result));
-        }
-
-        data_results_map
-            .entry("@graph".to_string())
-            .and_modify(|e| {
-                if let Value::Array(array) = e {
-                    array.extend(vec_parsed_results);
-                }
-            });
     }
+    let mut vec_parsed_results = Vec::new();
+    let files = temp_file.get_files().expect("Could not get files");
+
+    // p
+
+    for result in results {
+        let mut parsed_result: HashMap<String, Value> = HashMap::new();
+        let string_id: String = result["_id"].to_string();
+        parsed_result.insert("@id".to_string(), json!(string_id));
+        parsed_result.insert(
+            "@type".to_string(),
+            canonical_classes
+                .get(&class_name)
+                .unwrap()
+                .get("@id")
+                .unwrap()
+                .to_owned(),
+        );
+        for (key, value) in result.as_object().unwrap() {
+            if let Some(canonical_property) = canonical_properties.get(key) {
+                let key = canonical_property.get("@id").unwrap();
+                let shacl_shape = canonical_class_shacl_shapes.get(&class_name).unwrap();
+                let shacl_properties = shacl_shape.get("sh:property").unwrap();
+                let is_datetime = match shacl_properties.as_array().unwrap().iter().find(|&x| {
+                    let shacl_path = &x["sh:path"]["@id"];
+                    let y = Value::String("xsd:dateTime".to_string());
+                    shacl_path == key && x["sh:datatype"]["@id"] == y
+                }) {
+                    Some(_) => true,
+                    None => false,
+                };
+                let value = match is_datetime {
+                    true => json!(instant_to_iso_string(value.as_i64().unwrap())),
+                    false => value.to_owned(),
+                };
+                let key_string = match key {
+                    Value::String(value) => value.to_owned(),
+                    _ => key.to_string(),
+                };
+                parsed_result.insert(key_string, represent_fluree_value(&value));
+            }
+        }
+        vec_parsed_results.push(json!(parsed_result));
+    }
+
+    data_results_map
+        .entry("@graph".to_string())
+        .and_modify(|e| {
+            if let Value::Array(array) = e {
+                array.extend(vec_parsed_results);
+            }
+        });
 
     pb.finish_and_clear();
 
