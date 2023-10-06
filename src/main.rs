@@ -1,29 +1,25 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
-use crossterm::style::{Print, ResetColor, SetForegroundColor};
-use crossterm::{execute, style::Color};
 use dialoguer::console::{Style, Term};
-use dialoguer::{theme::ColorfulTheme, Input};
 use indicatif::{HumanDuration, ProgressBar, ProgressStyle};
-use reqwest::header::HeaderMap;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{self, prelude::*, stdout};
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Instant;
+use std::vec;
 use structopt::StructOpt;
 
 mod cli;
 mod console;
 mod fluree;
-mod lib;
+mod functions;
 
-pub use cli::opt::Opt;
-pub use console::console::{pretty_print, ERROR_COLOR};
-pub use fluree::query::SCHEMA_QUERY;
-pub use lib::functions::{
-    add_prefix, capitalize, instant_to_iso_string, remove_namespace, remove_underscore,
-    represent_fluree_value, standardize,
+use cli::opt::Opt;
+use cli::parser::Parser;
+use cli::temp_files::TempFile;
+use fluree::FlureeInstance;
+use functions::{
+    capitalize, case_normalize, instant_to_iso_string, parse_current_predicates,
+    parse_for_class_and_property_name, represent_fluree_value, standardize_class_name,
+    standardize_property_name, write_or_print,
 };
 
 #[tokio::main]
@@ -32,37 +28,13 @@ async fn main() -> Result<(), reqwest::Error> {
     let green_bold = Style::new().green().bold();
     let opt = Opt::from_args();
 
-    if opt.namespace.is_some() && opt.context.is_none() {
-        panic!("You must specify a context when using the --namespace (-n) flag\n\nExample: -c schema=http://schema.org/ -n schema");
-    }
+    opt.validate_namespace_and_context();
 
     let prefix = match opt.namespace.clone() {
         Some(namespace) => format!("{}:", namespace),
         None => "".to_string(),
     };
 
-    let mut api_key = opt.authorization;
-
-    let mut url = match opt.url.clone() {
-        Some(url) => url,
-        None => Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Fluree DB URL:")
-            .default("http://localhost:8090/fdb/ledger/name".to_string())
-            .show_default(true)
-            .validate_with({
-                move |input: &String| -> Result<(), &str> {
-                    if let Ok(_) = reqwest::Url::parse(input) {
-                        Ok(())
-                    } else {
-                        Err("Please provide a valid URL")
-                    }
-                }
-            })
-            .interact_text()
-            .unwrap(),
-    };
-
-    let (mut is_available, mut is_authorized) = (true, true);
     let mut response_string: Option<Value> = None;
 
     let pb = ProgressBar::new(2);
@@ -81,44 +53,21 @@ async fn main() -> Result<(), reqwest::Error> {
     );
     pb.set_prefix("Processing Fluree v3 Vocabulary");
 
-    while !is_available || !is_authorized || response_string.is_none() {
-        if !is_available {
-            url = Input::with_theme(&ColorfulTheme::default())
-                .with_prompt("Fluree DB URL:")
-                .default("http://localhost:8090/fdb/ledger/name".to_string())
-                .show_default(true)
-                .validate_with({
-                    move |input: &String| -> Result<(), &str> {
-                        if let Ok(_) = reqwest::Url::parse(input) {
-                            Ok(())
-                        } else {
-                            Err("Please provide a valid URL")
-                        }
-                    }
-                })
-                .interact_text()
-                .unwrap();
+    let mut source_instance = FlureeInstance::new(&opt);
+
+    while !source_instance.is_available
+        || !source_instance.is_authorized
+        || response_string.is_none()
+    {
+        if !source_instance.is_available {
+            source_instance.prompt_fix_url();
         }
-        if !is_authorized {
-            api_key = Some(
-                Input::with_theme(&ColorfulTheme::default())
-                    .with_prompt("Nexus API Key:")
-                    .interact_text()
-                    .unwrap(),
-            );
+
+        if !source_instance.is_authorized {
+            source_instance.prompt_api_key();
         }
         if pb.is_finished() {
             pb.reset();
-        }
-
-        let client = reqwest::Client::new();
-        let mut request_headers = HeaderMap::new();
-        request_headers.insert("Content-Type", "application/json".parse().unwrap());
-        if let Some(auth) = api_key.clone() {
-            request_headers.insert(
-                reqwest::header::AUTHORIZATION,
-                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", &auth)).unwrap(),
-            );
         }
 
         pb.println(format!(
@@ -127,70 +76,17 @@ async fn main() -> Result<(), reqwest::Error> {
         ));
         pb.inc(1);
 
-        let response_result = client
-            .post(&format!("{}/multi-query", url))
-            .headers(request_headers)
-            .body(SCHEMA_QUERY)
-            .send()
-            .await;
-        (is_available, is_authorized) = match &response_result {
-            Ok(response) => match response.status() {
-                reqwest::StatusCode::OK => (true, true),
-                reqwest::StatusCode::UNAUTHORIZED => {
-                    match api_key {
-                        Some(_) => {
-                            pretty_print(
-                                    "The API Key you provided is not authorized to access this database. Please try again.",
-                                    ERROR_COLOR,
-                                    true,
-                                );
-                        }
-                        None => {
-                            pb.finish_and_clear();
-                            pretty_print(
-                                    "It appears you need to provide an API Key to access this database. Please try again.",
-                                    ERROR_COLOR,
-                                    true,
-                                );
-                        }
-                    };
-                    (true, false)
-                }
-                _ => {
-                    pretty_print(
-                        &format!(
-                            "The request to [{}] returned a status code of {}. Please try again.",
-                            url,
-                            response.status()
-                        ),
-                        ERROR_COLOR,
-                        true,
-                    );
-                    (false, !api_key.is_some())
-                }
-            },
-            Err(_) => {
-                execute!(
-                    stdout(),
-                    SetForegroundColor(ERROR_COLOR),
-                    Print("The request to the database failed. Please try again."),
-                    Print("\n"),
-                    ResetColor
-                )
-                .unwrap();
-                (false, false)
-            }
-        };
-        match (is_available, is_authorized) {
-            (true, true) => {
-                let awaited_response = response_result.unwrap().text().await.unwrap();
-                response_string = serde_json::from_str(&awaited_response).unwrap();
-                break;
-            }
-            _ => {
-                pb.finish_and_clear();
-                continue;
-            }
+        let response_result = source_instance.issue_initial_query().await;
+
+        source_instance.validate_result(&response_result);
+
+        if source_instance.is_available && source_instance.is_authorized {
+            let awaited_response = response_result.unwrap().text().await.unwrap();
+            response_string = serde_json::from_str(&awaited_response).unwrap();
+            break;
+        } else {
+            pb.finish_and_clear();
+            continue;
         }
     }
 
@@ -200,328 +96,75 @@ async fn main() -> Result<(), reqwest::Error> {
     ));
     pb.inc(1);
 
-    let json: serde_json::Value = response_string.unwrap();
-    let pre_reduce_preds = json["current_predicates"].as_array().unwrap();
-    let initial_predicates = json["initial_predicates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_i64().unwrap())
-        .collect::<Vec<i64>>();
-    let current_predicates = pre_reduce_preds
-        .iter()
-        .filter(|value| {
-            let id = value["_id"].as_i64().unwrap();
-            !initial_predicates.contains(&id)
-        })
-        .collect::<Vec<&Value>>();
-    let json = serde_json::json!(current_predicates);
-    let mut context: HashMap<String, String> = HashMap::new();
-    match opt.context {
-        Some(contexts) => {
-            for context_string in contexts {
-                let mut context_parts = context_string.split("=");
-                let context_key = context_parts.next().expect("When using --context (-c), you must specify a key and value separated by an equals sign (e.g. --context schema=http://schema.org/)");
-                let context_value = context_parts.next().expect("When using --context (-c), you must specify a key and value separated by an equals sign (e.g. --context schema=http://schema.org/)");
-                context.insert(context_key.to_string(), context_value.to_string());
-            }
-        }
-        None => {}
-    }
+    let json = parse_current_predicates(response_string.unwrap());
 
-    match opt.base {
-        Some(base) => {
-            context.insert("@base".to_string(), base);
-        }
-        None => {
-            if opt.namespace.is_none() {
-                context.insert("@base".to_string(), format!("{}/terms/", url));
-            }
-        }
-    }
-    if opt.shacl {
-        context.insert("sh".to_string(), "http://www.w3.org/ns/shacl#".to_string());
-        context.insert(
-            "xsd".to_string(),
-            "http://www.w3.org/2001/XMLSchema#".to_string(),
-        );
-    }
-    context.insert(
-        "rdfs".to_string(),
-        "http://www.w3.org/2000/01/rdf-schema#".to_string(),
-    );
-
-    let mut canonical_classes: HashMap<String, Value> = HashMap::new();
-    let mut canonical_properties: HashMap<String, Value> = HashMap::new();
-    let mut canonical_class_shacl_shapes: HashMap<String, Value> = HashMap::new();
+    let mut parser = Parser::new(prefix, &opt, &source_instance);
 
     for item in json.as_array().unwrap() {
-        let item_id = item["_id"]
-            .as_i64()
-            .expect("An item in the JSON array does not have an _id");
-        let item_name = item["name"].as_str().expect(
-            format!(
-                "An item in the JSON array does not have a name: {:?}",
-                item_id
-            )
-            .as_str(),
-        );
-        let mut name_split = item_name.split("/");
-        let name_parts: [&str; 2] = [
-            name_split.next().expect(
-                format!(
-                    "{} does not have a collection and property name (e.g. collection/property)",
-                    item_name
-                )
-                .as_str(),
-            ),
-            name_split.next().expect(
-                format!(
-                    "{} does not have a collection and property name (e.g. collection/property)",
-                    item_name
-                )
-                .as_str(),
-            ),
-        ];
-        let orig_class_name = name_parts[0];
-        let class_name = remove_underscore(orig_class_name);
-        let class_name = &capitalize(class_name);
-        let class_name = standardize(class_name);
-        let class_name = add_prefix(&class_name, &prefix);
-        let orig_property_name = name_parts[1];
-        let property_name = standardize(orig_property_name);
-        let property_name = add_prefix(&property_name, &prefix);
+        let (orig_class_name, orig_property_name) = parse_for_class_and_property_name(item);
 
-        let keys = item.as_object().unwrap().keys();
+        let mut class_object = parser.get_or_create_class(&orig_class_name);
 
-        let class_object = canonical_classes.get(&orig_class_name.to_owned());
-        let mut class_object = match class_object {
-            Some(class_object) => class_object.to_owned(),
-            None => Value::Object(serde_json::Map::new()),
-        };
+        let mut property_object = parser.get_or_create_property(&orig_property_name);
 
-        class_object["@type"] = Value::String("rdfs:Class".to_string());
+        let mut class_shacl_shape = parser.get_or_create_shacl_shape(&orig_class_name);
 
-        let property_object = canonical_properties.get(orig_property_name);
-        let mut property_object = match property_object {
-            Some(property_object) => property_object.to_owned(),
-            None => Value::Object(serde_json::Map::new()),
-        };
+        let class_name = standardize_class_name(&orig_class_name, &parser.prefix);
+        let property_name = standardize_property_name(&orig_property_name, &parser.prefix);
 
-        property_object["@type"] = Value::String("rdf:Property".to_string());
+        class_object.set_property_range(&property_name);
+        property_object.set_class_domain(&class_name);
 
-        let class_shacl_shape = canonical_class_shacl_shapes.get(orig_class_name);
-        let mut class_shacl_shape = match class_shacl_shape {
-            Some(class_shacl_shape) => class_shacl_shape.to_owned(),
-            None => Value::Object(serde_json::Map::new()),
-        };
+        class_shacl_shape.set_property(&mut property_object, item, &parser.prefix);
 
-        class_shacl_shape["@type"] = Value::String("sh:NodeShape".to_string());
-        class_shacl_shape["sh:targetClass"] = serde_json::json!({ "@id": class_name });
-        let shacl_properties = class_shacl_shape.get("sh:property");
-        let mut shacl_properties = match shacl_properties {
-            Some(shacl_properties) => {
-                if let Value::Array(shacl_properties) = shacl_properties {
-                    shacl_properties.to_owned()
-                } else {
-                    panic!(
-                        "sh:property must be an array (e.g. [{{ \"sh:path\": \"schema:name\" }}])"
-                    );
-                }
+        parser
+            .shacl_shapes
+            .insert(orig_class_name.to_string(), class_shacl_shape);
+        parser
+            .classes
+            .insert(orig_class_name.to_string(), class_object);
+        parser
+            .properties
+            .insert(orig_property_name.to_string(), property_object);
+    }
+
+    let vocab_results_map = parser.get_vocab_json(&opt);
+    if opt.output.is_some() {
+        std::fs::remove_dir_all(opt.output.clone().unwrap()).unwrap_or_else(|why| {
+            if why.kind() != std::io::ErrorKind::NotFound {
+                panic!("Unable to remove existing output directory: {}", why);
             }
-            None => Vec::<Value>::new(),
-        };
-
-        class_object["@id"] = Value::String(String::from(&class_name));
-        class_object["rdfs:label"] = Value::String(String::from(remove_namespace(&class_name)));
-        let mut range: Vec<Value> = match class_object.get("rdfs:range") {
-            Some(range) => {
-                let range: Vec<Value> = match range {
-                    Value::Array(range) => range.to_owned(),
-                    _ => panic!("rdfs:range must be an array (e.g. [\"xsd:string\"])"),
-                };
-                range
-            }
-            None => {
-                let range: Vec<Value> = Vec::new();
-                range
-            }
-        };
-        range.push(serde_json::json!({ "@id": property_name }));
-        class_object["rdfs:range"] = range.into();
-        property_object["@id"] = Value::String(property_name.to_string());
-        property_object["rdfs:label"] =
-            Value::String(String::from(remove_namespace(&property_name)));
-        let mut domain: Vec<Value> = match property_object.get("rdfs:domain") {
-            Some(domain) => {
-                let domain: Vec<Value> = match domain {
-                    Value::Array(domain) => domain.to_owned(),
-                    _ => panic!("rdfs:domain must be an array (e.g. [\"schema:Person\"])"),
-                };
-                domain
-            }
-            None => {
-                let domain: Vec<Value> = Vec::new();
-                domain
-            }
-        };
-        domain.push(serde_json::json!({ "@id": class_name }));
-        property_object["rdfs:domain"] = domain.into();
-
-        let mut shacl_property = serde_json::json!({
-            "sh:path": { "@id": property_name},
         });
-
-        // if item["multi"] does not exist or is false, then add
-        // shacl_property["sh:maxCount"] = Value::Number(serde_json::Number::from(1));
-        if item["multi"].is_null() || !item["multi"].as_bool().unwrap() {
-            shacl_property["sh:maxCount"] = Value::Number(serde_json::Number::from(1));
-        }
-
-        for key in keys {
-            match key.as_str() {
-                // "_id" => {}
-                "doc" => {
-                    property_object["rdfs:comment"] =
-                        Value::String(item["doc"].as_str().unwrap().to_string());
-                }
-                "type" => {
-                    let type_value = item["type"].as_str().unwrap();
-                    match type_value {
-                        "float" | "int" | "instant" | "boolean" | "long" | "string" | "ref" => {
-                            shacl_property["sh:datatype"] = match type_value {
-                                "int" => Value::String("xsd:integer".to_string()),
-                                "instant" => Value::String("xsd:dateTime".to_string()),
-                                "ref" => Value::String("xsd:anyURI".to_string()),
-                                _ => Value::String(format!("xsd:{}", type_value)),
-                            };
-                        }
-                        "tag" => {
-                            // TODO: Figure out how to handle tag types
-                        }
-                        _ => {}
-                    }
-                }
-                "restrictCollection" => {
-                    shacl_property["sh:class"] = serde_json::json!({ "@id": add_prefix(&capitalize(&standardize(item["restrictCollection"].as_str().unwrap())), &prefix) });
-                }
-                "restrictTag" => {
-                    // this is a boolean
-                }
-                "unique" => {}
-                "index" => {}
-                "fullText" => {}
-                "upsert" => {}
-                _ => {}
-            }
-        }
-        shacl_properties.push(shacl_property);
-        class_shacl_shape["sh:property"] = shacl_properties.into();
-        canonical_class_shacl_shapes.insert(orig_class_name.to_string(), class_shacl_shape);
-        canonical_classes.insert(orig_class_name.to_string(), class_object);
-        canonical_properties.insert(orig_property_name.to_string(), property_object);
-
-        // let id = item["_id"].as_u64().unwrap();
-        // let name = item["name"].as_str().unwrap();
-        // let doc = item["doc"].as_str().unwrap();
-        // let type_ = item["type"].as_str().unwrap();
-
-        // let mut id_map = serde_json::Map::new();
-        // id_map.insert("@id".to_string(), Value::String(format!("{}:{}", name, id)));
-        // jsonld_item_map.insert("@id".to_string(), Value::Object(id_map));
-
-        // let mut type_map = serde_json::Map::new();
-        // type_map.insert("@type".to_string(), Value::String("rdfs:Class".to_string()));
-        // jsonld_item_map.insert("@type".to_string(), Value::Object(type_map));
-
-        // let mut label_map = serde_json::Map::new();
-        // label_map.insert("rdfs:label".to_string(), Value::String(name.to_string()));
-        // jsonld_item_map.insert("rdfs:label".to_string(), Value::Object(label_map));
-
-        // let mut comment_map = serde_json::Map::new();
-        // comment_map.insert("rdfs:comment".to_string(), Value::String(doc.to_string()));
-        // jsonld_item_map.insert("rdfs:comment".to_string(), Value::Object(comment_map));
-
-        // jsonld.push(jsonld_item);
     }
-    let classes = canonical_classes.values();
-    let properties = canonical_properties.values();
-    let class_shacl_shapes = canonical_class_shacl_shapes.values();
+    write_or_print(
+        &opt.output,
+        "0_vocab.jsonld",
+        serde_json::to_string_pretty(&vocab_results_map).unwrap(),
+    );
 
-    // i need to create a results variable that is the classes and properties values, as well as the values within Vec<Value> shacl_shapes
-    let results: Vec<Value> = match opt.shacl {
-        true => classes
-            .chain(properties)
-            .chain(class_shacl_shapes)
-            .map(|value| value.to_owned())
-            .collect(),
-        false => classes
-            .chain(properties)
-            .map(|value| value.to_owned())
-            .collect(),
-    };
+    let query_classes: Vec<String> = parser.classes.keys().map(|key| key.to_owned()).collect();
 
-    let query_classes: Vec<String> = canonical_classes.keys().map(|key| key.to_owned()).collect();
+    let mut data_results_map = serde_json::Map::new();
+    data_results_map.insert(
+        "f:ledger".to_string(),
+        json!(format!(
+            "{}/{}",
+            source_instance.network_name, source_instance.db_name
+        )),
+    );
 
-    let mut results_map = serde_json::Map::new();
-    if opt.is_create_ledger.clone() {
-        if opt.url.is_some() {
-            let url = opt.url.unwrap();
-            // I need to parse the URL for the ledger name
-            // the ledger name is the last section like "ledger/name" from the url
-            // So a url like https://api.dev.flur.ee/fdb/fluree/387028092977569 would be "fluree/387028092977569"
-            let mut url_parts = url
-                .split("/")
-                .collect::<Vec<&str>>()
-                .into_iter()
-                .rev()
-                .take(2);
-            let db_name = url_parts.next().unwrap();
-            let network_name = url_parts.next().unwrap();
-            results_map.insert(
-                "ledger".to_string(),
-                json!(format!("{}/{}", network_name, db_name)),
-            );
-        }
-        results_map.insert(
-            "defaultContext".to_string(),
-            Value::Object(
-                context
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
-                    .collect(),
-            ),
-        );
-        results_map.insert("txn".to_string(), Value::Array(results));
-    } else {
-        results_map.insert(
-            "@context".to_string(),
-            Value::Object(
-                context
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
-                    .collect(),
-            ),
-        );
-        results_map.insert("@graph".to_string(), Value::Array(results));
-    }
+    data_results_map.insert(
+        "@context".to_string(),
+        Value::Object(
+            parser
+                .context
+                .iter()
+                .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+                .collect(),
+        ),
+    );
 
-    /*
-    Now I'm going to iterate through the query_classes and create at least one query for each one.
-    The query will be like { "select": ["*"], "from": "{{class_name}}", "opts": { "limit": 1000 } }
-    If the length of the result is 1000, then I will issue another query like this
-    { "select": ["*"], "from": "{{class_name}}", "opts": { "limit": 1000, offset": 1000 } }
-    and so on until the length of the result is less than 1000
-     */
-    let client = reqwest::Client::new();
-    let mut request_headers = HeaderMap::new();
-    request_headers.insert("Content-Type", "application/json".parse().unwrap());
-    if let Some(auth) = api_key.clone() {
-        request_headers.insert(
-            reqwest::header::AUTHORIZATION,
-            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", &auth)).unwrap(),
-        );
-    }
+    data_results_map.insert("@graph".to_string(), json!([]));
 
     pb.inc_length(query_classes.len() as u64);
     pb.set_style(
@@ -539,6 +182,9 @@ async fn main() -> Result<(), reqwest::Error> {
     );
     pb.set_prefix("Transforming Fluree v2 Entities");
 
+    let temp_dir = Path::new(".tmp");
+    let mut temp_file = TempFile::new(temp_dir).expect("Could not create temp file");
+
     for class_name in query_classes {
         let mut results: Vec<Value> = Vec::new();
         let mut offset: u32 = 0;
@@ -546,9 +192,10 @@ async fn main() -> Result<(), reqwest::Error> {
         pb.println(format!(
             "{:>12} {} Data",
             green_bold.apply_to("Transforming"),
-            standardize(&capitalize(&class_name))
+            case_normalize(&capitalize(&class_name))
         ));
         pb.inc(1);
+
         loop {
             let query = format!(
                 r#"{{
@@ -556,54 +203,90 @@ async fn main() -> Result<(), reqwest::Error> {
                     "from": "{}",
                     "opts": {{
                         "compact": true,
-                        "limit": 1000,
+                        "limit": 2000,
+                        "fuel": 9999999999,
                         "offset": {}
                     }}
                 }}"#,
                 class_name, offset
             );
 
-            let response_result = client
-                .post(&format!("{}/query", url))
-                .headers(request_headers.clone())
-                .body(query)
-                .send()
-                .await;
+            let response_result = source_instance.issue_data_query(query).await;
             let response = response_result.unwrap().text().await.unwrap();
             let response: Value = serde_json::from_str(&response).unwrap();
             let response = response.as_array().unwrap();
+
             if response.len() == 0 {
+                temp_file
+                    .write(&class_name, &results)
+                    .expect(format!("Issue writing file for {}", class_name).as_str());
+                results.clear();
                 break;
             }
+
             results = match offset {
                 0 => response.to_owned(),
                 _ => results.into_iter().chain(response.to_owned()).collect(),
             };
-            offset += 1000;
+
+            let results_length = results.len();
+
+            if results_length > 5_000 {
+                temp_file.write(&class_name, &results).expect(
+                    format!("Issue writing file for {} at offset {}", class_name, offset).as_str(),
+                );
+                results.clear();
+            }
+
+            offset += 2000;
         }
-        let mut vec_parsed_results = Vec::new();
+    }
+    let mut vec_parsed_results = Vec::new();
+    let files = temp_file.get_files().expect("Could not get files");
+
+    let mut result_size: u64 = 0;
+    let mut file_num: u64 = 1;
+
+    for file in files {
+        result_size += file.metadata().expect("Could not get metadata").len();
+
+        let file_bytes = std::fs::read(&file).expect("Could not read file");
+        let file_string = String::from_utf8(file_bytes).expect("Could not convert to string");
+        let results: Vec<Value> = serde_json::from_str(&file_string).expect("Could not parse JSON");
+        let orig_class_name = file
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split("__")
+            .collect::<Vec<&str>>()
+            .last()
+            .unwrap()
+            .to_string();
+
         for result in results {
             let mut parsed_result: HashMap<String, Value> = HashMap::new();
             let string_id: String = result["_id"].to_string();
             parsed_result.insert("@id".to_string(), json!(string_id));
-            parsed_result.insert(
-                "@type".to_string(),
-                canonical_classes
-                    .get(&class_name)
-                    .unwrap()
-                    .get("@id")
-                    .unwrap()
-                    .to_owned(),
-            );
+
+            let class_name = match parser.classes.get(&orig_class_name) {
+                Some(class) => class.id.to_owned(),
+                None => panic!("Could not find class {}", orig_class_name),
+            };
+
+            parsed_result.insert("@type".to_string(), serde_json::json!(&class_name));
             for (key, value) in result.as_object().unwrap() {
-                if let Some(canonical_property) = canonical_properties.get(key) {
-                    let key = canonical_property.get("@id").unwrap();
-                    let shacl_shape = canonical_class_shacl_shapes.get(&class_name).unwrap();
-                    let shacl_properties = shacl_shape.get("sh:property").unwrap();
-                    let is_datetime = match shacl_properties.as_array().unwrap().iter().find(|&x| {
-                        let shacl_path = &x["sh:path"];
-                        let y = Value::String("xsd:dateTime".to_string());
-                        shacl_path == key && x["sh:datatype"] == y
+                if let Some(canonical_property) = parser.properties.get(key) {
+                    let key = canonical_property.id.to_owned();
+                    let shacl_shape = parser.shacl_shapes.get(&orig_class_name).unwrap();
+                    let shacl_properties = &shacl_shape.property;
+                    let is_datetime = match shacl_properties.iter().find(|&x| {
+                        let shacl_path = x.path.get("@id").unwrap();
+                        let y = "xsd:dateTime";
+                        if x.datatype.is_none() {
+                            return false;
+                        }
+                        shacl_path == &key && x.datatype.clone().unwrap().get("@id").unwrap() == y
                     }) {
                         Some(_) => true,
                         None => false,
@@ -612,47 +295,59 @@ async fn main() -> Result<(), reqwest::Error> {
                         true => json!(instant_to_iso_string(value.as_i64().unwrap())),
                         false => value.to_owned(),
                     };
-                    let key_string = match key {
-                        Value::String(value) => value.to_owned(),
-                        _ => key.to_string(),
-                    };
-                    parsed_result.insert(key_string, represent_fluree_value(&value));
+                    // let key_string = match key {
+                    //     Value::String(value) => value.to_owned(),
+                    //     _ => key.to_string(),
+                    // };
+                    parsed_result.insert(key, represent_fluree_value(&value));
                 }
             }
             vec_parsed_results.push(json!(parsed_result));
         }
 
-        let key = if opt.is_create_ledger {
-            "txn"
-        } else {
-            "@graph"
-        };
-        results_map.entry(key.to_string()).and_modify(|e| {
-            if let Value::Array(array) = e {
-                array.extend(vec_parsed_results);
-            }
-        });
+        data_results_map
+            .entry("@graph".to_string())
+            .and_modify(|e| {
+                if let Value::Array(array) = e {
+                    array.extend(vec_parsed_results.clone());
+                }
+            });
+
+        vec_parsed_results.clear();
+
+        // if result_size is greater than 5mb, write to file
+        if result_size > 2_500_000 {
+            write_or_print(
+                &opt.output,
+                format!("{}_data.jsonld", file_num),
+                serde_json::to_string_pretty(&data_results_map).unwrap(),
+            );
+
+            result_size = 0;
+            file_num += 1;
+            vec_parsed_results.clear();
+            data_results_map
+                .entry("@graph".to_string())
+                .and_modify(|e| {
+                    *e = serde_json::json!([]);
+                });
+        }
+
+        // delete file
+        std::fs::remove_file(file).expect("Could not remove file");
     }
+    std::fs::remove_dir_all(temp_dir).expect("Could not remove temp directory");
+
+    write_or_print(
+        &opt.output,
+        format!("{}_data.jsonld", file_num),
+        serde_json::to_string_pretty(&data_results_map).unwrap(),
+    );
 
     pb.finish_and_clear();
 
-    match opt.output.clone() {
-        Some(output) => {
-            let mut file = File::create(output).expect("Could not create file");
-            file.write_all(
-                serde_json::to_string_pretty(&results_map)
-                    .unwrap()
-                    .as_bytes(),
-            )
-            .expect("Could not write to file");
-        }
-        None => {
-            println!("{}", serde_json::to_string_pretty(&results_map).unwrap());
-        }
-    }
-
     let finish_line = match opt.output {
-        Some(output) => format!("to {} ", output.to_str().unwrap()),
+        Some(output) => format!("to {}/ ", output.to_str().unwrap()),
         None => "".to_string(),
     };
     println!(
