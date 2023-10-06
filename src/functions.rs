@@ -1,12 +1,13 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use crossterm::execute;
-use crossterm::style::{Print, ResetColor};
+use crossterm::style::{Print, ResetColor, SetForegroundColor};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, prelude::*, stdout};
 
 use crate::cli::opt::Opt;
+use crate::console::ERROR_COLOR;
 // use crate::cli::opt::Opt;
 use crate::fluree::FlureeInstance;
 
@@ -97,6 +98,18 @@ pub fn standardize_property_name(string: &str, prefix: &str) -> String {
 }
 
 pub fn parse_current_predicates(json: Value) -> Value {
+    if json["current_predicates"].is_null() || json["initial_predicates"].is_null() {
+        // safely shutdown the program and print an error message
+        execute!(
+            stdout(),
+            SetForegroundColor(ERROR_COLOR),
+            Print("ERROR: "),
+            Print("Attempting to retrieve the schema from the database failed. If you provided an API Key, please check that it is correct. If you did not provide an API Key, please check that the database is running and that you have access to it."),
+            Print("\n"),
+            ResetColor
+        ).unwrap();
+        std::process::exit(1);
+    }
     let pre_reduce_preds = json["current_predicates"].as_array().unwrap();
     let initial_predicates = json["initial_predicates"]
         .as_array()

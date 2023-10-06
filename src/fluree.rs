@@ -175,7 +175,7 @@ impl FlureeInstance {
                     ResetColor
                 )
                 .unwrap();
-                (false, false)
+                (false, true)
             }
         };
     }
