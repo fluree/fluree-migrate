@@ -5,7 +5,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, prelude::*, stdout};
-use std::path::PathBuf;
 
 use crate::cli::opt::Opt;
 // use crate::cli::opt::Opt;
@@ -200,25 +199,25 @@ pub fn parse_for_class_and_property_name(item: &Value) -> (String, String) {
     (orig_class_name, orig_property_name)
 }
 
-pub fn write_or_print<P>(output: &Option<PathBuf>, file_name: P, data: String)
+pub fn write_or_print<P>(opt: &Opt, file_name: P, data: String)
 where
     P: AsRef<std::path::Path>,
 {
-    match output {
-        Some(output) => {
-            std::fs::create_dir_all(output).unwrap_or_else(|why| {
+    match opt.print {
+        false => {
+            std::fs::create_dir_all(opt.output.clone()).unwrap_or_else(|why| {
                 if why.kind() != std::io::ErrorKind::AlreadyExists {
                     panic!("Unable to create output directory: {}", why);
                 }
             });
 
-            let mut file = File::create(output.join(file_name)).expect("Unable to create file");
+            let mut file = File::create(opt.output.join(file_name)).expect("Unable to create file");
             let mut data_writer = io::BufWriter::new(&mut file);
             data_writer
                 .write_all(data.as_bytes())
                 .expect("Unable to write data");
         }
-        None => {
+        true => {
             let mut stdout = stdout();
             execute!(stdout, Print(data), ResetColor).unwrap();
         }

@@ -129,15 +129,15 @@ async fn main() -> Result<(), reqwest::Error> {
     }
 
     let vocab_results_map = parser.get_vocab_json(&opt);
-    if opt.output.is_some() {
-        std::fs::remove_dir_all(opt.output.clone().unwrap()).unwrap_or_else(|why| {
+    if !opt.print {
+        std::fs::remove_dir_all(opt.output.clone()).unwrap_or_else(|why| {
             if why.kind() != std::io::ErrorKind::NotFound {
                 panic!("Unable to remove existing output directory: {}", why);
             }
         });
     }
     write_or_print(
-        &opt.output,
+        &opt,
         "0_vocab.jsonld",
         serde_json::to_string_pretty(&vocab_results_map).unwrap(),
     );
@@ -318,7 +318,7 @@ async fn main() -> Result<(), reqwest::Error> {
         // if result_size is greater than 5mb, write to file
         if result_size > 2_500_000 {
             write_or_print(
-                &opt.output,
+                &opt,
                 format!("{}_data.jsonld", file_num),
                 serde_json::to_string_pretty(&data_results_map).unwrap(),
             );
@@ -339,16 +339,16 @@ async fn main() -> Result<(), reqwest::Error> {
     std::fs::remove_dir_all(temp_dir).expect("Could not remove temp directory");
 
     write_or_print(
-        &opt.output,
+        &opt,
         format!("{}_data.jsonld", file_num),
         serde_json::to_string_pretty(&data_results_map).unwrap(),
     );
 
     pb.finish_and_clear();
 
-    let finish_line = match opt.output {
-        Some(output) => format!("to {}/ ", output.to_str().unwrap()),
-        None => "".to_string(),
+    let finish_line = match opt.print {
+        false => format!("to {}/ ", opt.output.to_str().unwrap()),
+        true => "".to_string(),
     };
     println!(
         "{:>12} v3 Migration {}in {}",

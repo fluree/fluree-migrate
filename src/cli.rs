@@ -9,34 +9,45 @@ pub mod opt {
         about = "Converts Fluree v2 schema JSON to Fluree v3 JSON-LD"
     )]
     pub struct Opt {
-        /// Input URL
+        /// Accessible URL for v2 Fluree DB. This will be used to fetch the schema and data state
         #[structopt(short, long, conflicts_with = "input")]
         pub url: Option<String>,
 
         /// Authorization token for Nexus ledgers
+        /// e.g. 796b******854d
         #[structopt(short, long, conflicts_with = "input", requires = "url")]
         pub authorization: Option<String>,
 
         /// Output file path
-        #[structopt(short, long, parse(from_os_str))]
-        pub output: Option<PathBuf>,
+        #[structopt(short, long, parse(from_os_str), default_value = "output")]
+        pub output: PathBuf,
+
+        /// If set, then the output will be printed to stdout instead of written to local files (Conflicts with --output)
+        #[structopt(long, conflicts_with = "output")]
+        pub print: bool,
 
         /// @base value for @context
+        /// e.g. http://flur.ee/ids/
+        /// This will be used as a default IRI prefix for all data entities
         #[structopt(short, long)]
         pub base: Option<String>,
 
-        /// @context value(s)
+        /// @context value(s) -- multiple values can be provided
+        /// e.g. -c schema=http://schema.org/ -c ex=http://example.org/
         #[structopt(short, long)]
         pub context: Option<Vec<String>>,
 
         /// @context namespace to use for new classes and properties
+        /// This depends on at least one @context term being introduce with -c
+        /// e.g. -c ex=http://example.org/ -n ex
         #[structopt(short, long, requires = "context")]
         pub namespace: Option<String>,
 
-        // I want to add a flag --shacl that is by default false, but if it is true, then it will add the shacl shapes to the output
+        /// If set, then the result vocab JSON-LD will include SHACL shapes for each class
         #[structopt(short, long)]
         pub shacl: bool,
 
+        /// If set, then the first output file will be syntax-formatted for creating a new ledger
         #[structopt(long = "create-ledger")]
         pub is_create_ledger: bool,
     }
