@@ -295,10 +295,6 @@ async fn main() -> Result<(), reqwest::Error> {
                         true => json!(instant_to_iso_string(value.as_i64().unwrap())),
                         false => value.to_owned(),
                     };
-                    // let key_string = match key {
-                    //     Value::String(value) => value.to_owned(),
-                    //     _ => key.to_string(),
-                    // };
                     parsed_result.insert(key, represent_fluree_value(&value));
                 }
             }
@@ -315,7 +311,6 @@ async fn main() -> Result<(), reqwest::Error> {
 
         vec_parsed_results.clear();
 
-        // if result_size is greater than 5mb, write to file
         if result_size > 2_500_000 {
             write_or_print(
                 &opt,
@@ -333,7 +328,6 @@ async fn main() -> Result<(), reqwest::Error> {
                 });
         }
 
-        // delete file
         std::fs::remove_file(file).expect("Could not remove file");
     }
     std::fs::remove_dir_all(temp_dir).expect("Could not remove temp directory");

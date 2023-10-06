@@ -98,7 +98,6 @@ pub mod temp_files {
 
     impl TempFile {
         pub fn new(directory: &Path) -> io::Result<Self> {
-            // I want to check if a dir exists and if so, I want to delete all of its contents. If it does not delete, I want to create it
             if directory.exists() {
                 fs::remove_dir_all(directory)?;
             }
@@ -152,17 +151,9 @@ pub mod temp_files {
                 })
                 .collect();
 
-            files.sort(); // Sort the files to read them in order
+            files.sort();
 
             Ok(files.to_owned())
-
-            // for file in files {
-            //     let mut file_data = Vec::new();
-            //     File::open(&file)?.read_to_end(&mut file_data)?;
-            //     data.push(file_data);
-            // }
-
-            // Ok(data)
         }
     }
 }
@@ -403,7 +394,6 @@ pub mod parser {
                 ShaclShape {
                     id: String::new(),
                     type_: "sh:NodeShape".to_string(),
-                    // new HashMap with initial values { "id": class_name }
                     target_class: {
                         let mut map = HashMap::new();
                         map.insert("@id".to_string(), class_name.to_string());
@@ -432,7 +422,6 @@ pub mod parser {
 
                 for key in keys {
                     match key.as_str() {
-                        // "_id" => {}
                         "doc" => {
                             property_object.comment = item["doc"].as_str().unwrap().to_string();
                         }

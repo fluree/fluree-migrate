@@ -99,7 +99,6 @@ pub fn standardize_property_name(string: &str, prefix: &str) -> String {
 
 pub fn parse_current_predicates(json: Value) -> Value {
     if json["current_predicates"].is_null() || json["initial_predicates"].is_null() {
-        // safely shutdown the program and print an error message
         execute!(
             stdout(),
             SetForegroundColor(ERROR_COLOR),
