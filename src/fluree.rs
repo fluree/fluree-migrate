@@ -43,8 +43,8 @@ pub struct FlureeInstance {
 }
 
 impl FlureeInstance {
-    pub fn new(opt: &Opt) -> Self {
-        let url = opt.check_url();
+    pub fn new_source(opt: &Opt) -> Self {
+        let url = opt.check_url(true);
         let (network_name, db_name) = Self::get_db_name(&url);
         FlureeInstance {
             url: url.to_string(),
@@ -52,7 +52,21 @@ impl FlureeInstance {
             db_name,
             is_available: true,
             is_authorized: true,
-            api_key: opt.authorization.clone(),
+            api_key: opt.source_auth.clone(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    pub fn new_target(opt: &Opt) -> Self {
+        let url = opt.check_url(false);
+        let (network_name, db_name) = Self::get_db_name(&url);
+        FlureeInstance {
+            url: url.to_string(),
+            network_name,
+            db_name,
+            is_available: true,
+            is_authorized: true,
+            api_key: opt.target_auth.clone(),
             client: reqwest::Client::new(),
         }
     }

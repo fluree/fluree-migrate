@@ -3,8 +3,7 @@ use crossterm::execute;
 use crossterm::style::{Print, ResetColor, SetForegroundColor};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{self, prelude::*, stdout};
+use std::io::stdout;
 
 use crate::cli::opt::Opt;
 use crate::console::ERROR_COLOR;
@@ -209,29 +208,4 @@ pub fn parse_for_class_and_property_name(item: &Value) -> (String, String) {
     let orig_class_name = name_parts[0].to_string();
     let orig_property_name = name_parts[1].to_string();
     (orig_class_name, orig_property_name)
-}
-
-pub fn write_or_print<P>(opt: &Opt, file_name: P, data: String)
-where
-    P: AsRef<std::path::Path>,
-{
-    match opt.print {
-        false => {
-            std::fs::create_dir_all(opt.output.clone()).unwrap_or_else(|why| {
-                if why.kind() != std::io::ErrorKind::AlreadyExists {
-                    panic!("Unable to create output directory: {}", why);
-                }
-            });
-
-            let mut file = File::create(opt.output.join(file_name)).expect("Unable to create file");
-            let mut data_writer = io::BufWriter::new(&mut file);
-            data_writer
-                .write_all(data.as_bytes())
-                .expect("Unable to write data");
-        }
-        true => {
-            let mut stdout = stdout();
-            execute!(stdout, Print(data), ResetColor).unwrap();
-        }
-    }
 }

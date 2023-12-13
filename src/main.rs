@@ -19,7 +19,7 @@ use fluree::FlureeInstance;
 use functions::{
     capitalize, case_normalize, instant_to_iso_string, parse_current_predicates,
     parse_for_class_and_property_name, represent_fluree_value, standardize_class_name,
-    standardize_property_name, write_or_print,
+    standardize_property_name,
 };
 
 #[tokio::main]
@@ -53,7 +53,7 @@ async fn main() -> Result<(), reqwest::Error> {
     );
     pb.set_prefix("Processing Fluree v3 Vocabulary");
 
-    let mut source_instance = FlureeInstance::new(&opt);
+    let mut source_instance = FlureeInstance::new_source(&opt);
 
     while !source_instance.is_available
         || !source_instance.is_authorized
@@ -100,26 +100,49 @@ async fn main() -> Result<(), reqwest::Error> {
 
     let mut parser = Parser::new(prefix, &opt, &source_instance);
 
-    for item in json.as_array().unwrap() {
+    let json_results = json.as_array().unwrap();
+
+    for item in json_results {
+        let (orig_class_name, orig_property_name) = parse_for_class_and_property_name(item);
+
+        let class_object = parser.get_or_create_class(&orig_class_name);
+
+        let type_value = item["type"].as_str().unwrap();
+
+        let property_obj = parser.get_or_create_property(&orig_property_name, type_value);
+
+        parser
+            .classes
+            .insert(orig_class_name.to_string(), class_object);
+        parser
+            .properties
+            .insert(orig_property_name.to_string(), property_obj);
+    }
+
+    for item in json_results {
         let (orig_class_name, orig_property_name) = parse_for_class_and_property_name(item);
 
         let mut class_object = parser.get_or_create_class(&orig_class_name);
 
-        let mut property_object = parser.get_or_create_property(&orig_property_name);
+        let type_value = item["type"].as_str().unwrap();
 
-        let mut class_shacl_shape = parser.get_or_create_shacl_shape(&orig_class_name);
+        let mut property_object = parser.get_or_create_property(&orig_property_name, type_value);
 
         let class_name = standardize_class_name(&orig_class_name, &parser.prefix);
         let property_name = standardize_property_name(&orig_property_name, &parser.prefix);
 
+        let mut class_shacl_shape = parser.get_or_create_shacl_shape(&class_name);
+
         class_object.set_property_range(&property_name);
         property_object.set_class_domain(&class_name);
+
+        // TODO: if another shacl_shape in parser.shacl_shapes has the same property name, and if it has a different datatype, then I need to log a warning and I need to update the property name to be the Class/Property (e.g. Person/age and Animal/age)
 
         class_shacl_shape.set_property(&mut property_object, item, &parser.prefix);
 
         parser
             .shacl_shapes
-            .insert(orig_class_name.to_string(), class_shacl_shape);
+            .insert(class_name.to_string(), class_shacl_shape);
         parser
             .classes
             .insert(orig_class_name.to_string(), class_object);
@@ -136,17 +159,20 @@ async fn main() -> Result<(), reqwest::Error> {
             }
         });
     }
-    write_or_print(
-        &opt,
-        "0_vocab.jsonld",
-        serde_json::to_string_pretty(&vocab_results_map).unwrap(),
-    );
+
+    let _ = opt
+        .write_or_print(
+            "0_vocab.jsonld",
+            serde_json::to_string_pretty(&vocab_results_map).unwrap(),
+            None,
+        )
+        .await;
 
     let query_classes: Vec<String> = parser.classes.keys().map(|key| key.to_owned()).collect();
 
     let mut data_results_map = serde_json::Map::new();
     data_results_map.insert(
-        "f:ledger".to_string(),
+        "ledger".to_string(),
         json!(format!(
             "{}/{}",
             source_instance.network_name, source_instance.db_name
@@ -164,7 +190,7 @@ async fn main() -> Result<(), reqwest::Error> {
         ),
     );
 
-    data_results_map.insert("@graph".to_string(), json!([]));
+    data_results_map.insert("insert".to_string(), json!([]));
 
     pb.inc_length(query_classes.len() as u64);
     pb.set_style(
@@ -199,7 +225,7 @@ async fn main() -> Result<(), reqwest::Error> {
         loop {
             let query = format!(
                 r#"{{
-                    "select": ["*"],
+                    "selectDistinct": ["*"],
                     "from": "{}",
                     "opts": {{
                         "compact": true,
@@ -213,6 +239,7 @@ async fn main() -> Result<(), reqwest::Error> {
 
             let response_result = source_instance.issue_data_query(query).await;
             let response = response_result.unwrap().text().await.unwrap();
+
             let response: Value = serde_json::from_str(&response).unwrap();
             let response = response.as_array().unwrap();
 
@@ -278,7 +305,7 @@ async fn main() -> Result<(), reqwest::Error> {
             for (key, value) in result.as_object().unwrap() {
                 if let Some(canonical_property) = parser.properties.get(key) {
                     let key = canonical_property.id.to_owned();
-                    let shacl_shape = parser.shacl_shapes.get(&orig_class_name).unwrap();
+                    let shacl_shape = parser.shacl_shapes.get(&class_name).unwrap();
                     let shacl_properties = &shacl_shape.property;
                     let is_datetime = match shacl_properties.iter().find(|&x| {
                         let shacl_path = x.path.get("@id").unwrap();
@@ -302,7 +329,7 @@ async fn main() -> Result<(), reqwest::Error> {
         }
 
         data_results_map
-            .entry("@graph".to_string())
+            .entry("insert".to_string())
             .and_modify(|e| {
                 if let Value::Array(array) = e {
                     array.extend(vec_parsed_results.clone());
@@ -312,17 +339,19 @@ async fn main() -> Result<(), reqwest::Error> {
         vec_parsed_results.clear();
 
         if result_size > 2_500_000 {
-            write_or_print(
-                &opt,
-                format!("{}_data.jsonld", file_num),
-                serde_json::to_string_pretty(&data_results_map).unwrap(),
-            );
+            let _ = opt
+                .write_or_print(
+                    format!("{}_data.jsonld", file_num),
+                    serde_json::to_string_pretty(&data_results_map).unwrap(),
+                    None,
+                )
+                .await;
 
             result_size = 0;
             file_num += 1;
             vec_parsed_results.clear();
             data_results_map
-                .entry("@graph".to_string())
+                .entry("insert".to_string())
                 .and_modify(|e| {
                     *e = serde_json::json!([]);
                 });
@@ -332,11 +361,13 @@ async fn main() -> Result<(), reqwest::Error> {
     }
     std::fs::remove_dir_all(temp_dir).expect("Could not remove temp directory");
 
-    write_or_print(
-        &opt,
-        format!("{}_data.jsonld", file_num),
-        serde_json::to_string_pretty(&data_results_map).unwrap(),
-    );
+    let _ = opt
+        .write_or_print(
+            format!("{}_data.jsonld", file_num),
+            serde_json::to_string_pretty(&data_results_map).unwrap(),
+            None,
+        )
+        .await;
 
     pb.finish_and_clear();
 

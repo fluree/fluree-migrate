@@ -1,7 +1,17 @@
 pub mod opt {
+    use crossterm::{
+        execute,
+        style::{Print, ResetColor},
+    };
     use dialoguer::{theme::ColorfulTheme, Input};
-    use std::path::PathBuf;
+    use std::{
+        fs::File,
+        io::{self, stdout, Write},
+        path::PathBuf,
+    };
     use structopt::StructOpt;
+
+    use crate::fluree::FlureeInstance;
 
     #[derive(Debug, StructOpt)]
     #[structopt(
@@ -15,15 +25,28 @@ pub mod opt {
 
         /// Authorization token for Nexus ledgers
         /// e.g. 796b******854d
-        #[structopt(short, long, conflicts_with = "input", requires = "url")]
-        pub authorization: Option<String>,
+        #[structopt(long, conflicts_with = "input", requires = "url")]
+        pub source_auth: Option<String>,
 
         /// Output file path
         #[structopt(short, long, parse(from_os_str), default_value = "output")]
         pub output: PathBuf,
 
+        /// The v3 instance to transact resulting JSON-LD data into
+        /// e.g. http://localhost:58090
+        #[structopt(
+            long = "target-db",
+            conflicts_with = "output",
+            conflicts_with = "print"
+        )]
+        pub target: Option<String>,
+
+        /// Authorization token for the target v3 instance (if hosted on Nexus)
+        #[structopt(long, requires = "target")]
+        pub target_auth: Option<String>,
+
         /// If set, then the output will be printed to stdout instead of written to local files (Conflicts with --output)
-        #[structopt(long, conflicts_with = "output")]
+        #[structopt(long, conflicts_with = "output", conflicts_with = "target")]
         pub print: bool,
 
         /// @base value for @context
@@ -53,8 +76,13 @@ pub mod opt {
     }
 
     impl Opt {
-        pub fn check_url(&self) -> String {
-            match &self.url {
+        pub fn check_url(&self, is_source: bool) -> String {
+            let url = if is_source {
+                self.url.clone()
+            } else {
+                self.target.clone()
+            };
+            match url {
                 Some(url) => url.to_owned(),
                 None => Input::with_theme(&ColorfulTheme::default())
                     .with_prompt("Fluree DB URL:")
@@ -77,6 +105,56 @@ pub mod opt {
         pub fn validate_namespace_and_context(&self) {
             if self.namespace.is_some() && self.context.is_none() {
                 panic!("You must specify a context when using the --namespace (-n) flag\n\nExample: -c schema=http://schema.org/ -n schema");
+            }
+        }
+
+        pub async fn write_or_print<P>(
+            &self,
+            file_name: P,
+            data: String,
+            target_instance: Option<FlureeInstance>,
+        ) -> Option<FlureeInstance>
+        where
+            P: AsRef<std::path::Path>,
+        {
+            if self.print {
+                let mut stdout = stdout();
+                execute!(stdout, Print(data), ResetColor).unwrap();
+                None
+            } else if self.target.is_some() {
+                let target_instance = match target_instance {
+                    None => FlureeInstance::new_target(&self),
+                    Some(fi) => fi,
+                };
+                let target = self.target.as_ref().unwrap();
+                let url = format!("{}/fdb/tx", target);
+                let client = reqwest::Client::new();
+                let res = client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .body(data)
+                    .send()
+                    .await
+                    .unwrap();
+
+                let body = res.text().await.unwrap();
+                println!("{}", body);
+                Some(target_instance)
+            } else {
+                let base_path = self.output.clone();
+                std::fs::create_dir_all(&base_path).unwrap_or_else(|why| {
+                    if why.kind() != std::io::ErrorKind::AlreadyExists {
+                        panic!("Unable to create output directory: {}", why);
+                    }
+                });
+
+                let mut file =
+                    File::create(&base_path.join(file_name)).expect("Unable to create file");
+                let mut data_writer = io::BufWriter::new(&mut file);
+                data_writer
+                    .write_all(data.as_bytes())
+                    .expect("Unable to write data");
+                None
             }
         }
     }
@@ -229,7 +307,7 @@ pub mod parser {
             let mut vocab_results_map = serde_json::Map::new();
 
             vocab_results_map.insert(
-                "f:ledger".to_string(),
+                "ledger".to_string(),
                 serde_json::json!(format!("{}/{}", self.network_name, self.db_name)),
             );
 
@@ -239,7 +317,7 @@ pub mod parser {
                     serde_json::json!({ "f": "https://ns.flur.ee/ledger#"}),
                 );
                 vocab_results_map.insert(
-                    "f:defaultContext".to_string(),
+                    "@context".to_string(),
                     Value::Object(
                         self.context
                             .iter()
@@ -259,7 +337,7 @@ pub mod parser {
                 );
             }
 
-            vocab_results_map.insert("@graph".to_string(), Value::Array(results));
+            vocab_results_map.insert("insert".to_string(), Value::Array(results));
 
             vocab_results_map
         }
@@ -274,11 +352,11 @@ pub mod parser {
             class_object
         }
 
-        pub fn get_or_create_property(&self, property_name: &str) -> Property {
+        pub fn get_or_create_property(&self, property_name: &str, type_value: &str) -> Property {
             let property_object = self.properties.get(property_name);
             let property_object = match property_object {
-                Some(property_object) => property_object.to_owned(),
-                None => Property::new(property_name, &self.prefix),
+                Some(property_object) => property_object.update_types_and_own(type_value),
+                None => Property::new(property_name, &self.prefix, type_value),
             };
             property_object
         }
@@ -291,16 +369,19 @@ pub mod parser {
             };
             shacl_shape
         }
+
+        // TODO: if another shacl_shape in parser.shacl_shapes has the same property name, and if it has a different datatype, then I need to log a warning and I need to update the property name to be the Class/Property (e.g. Person/age and Animal/age)
     }
 
     pub mod jsonld {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
 
         use serde::{Deserialize, Serialize};
         use serde_json::Value;
 
-        use crate::functions::{
-            remove_namespace, standardize_class_name, standardize_property_name,
+        use crate::{
+            console::pretty_print,
+            functions::{remove_namespace, standardize_class_name, standardize_property_name},
         };
 
         #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -351,18 +432,57 @@ pub mod parser {
             pub comment: String,
             #[serde(rename = "rdfs:domain")]
             pub domain: Vec<HashMap<String, String>>,
+            #[serde(skip_serializing)]
+            pub data_types: HashSet<String>,
         }
 
         impl Property {
-            pub fn new(property_name: &str, prefix: &str) -> Self {
+            pub fn new(property_name: &str, prefix: &str, type_value: &str) -> Self {
                 let standard_property_name = standardize_property_name(property_name, prefix);
+                let data_type = Self::normalize_type_value(type_value);
+                let data_types: HashSet<String> = match data_type {
+                    Some(data_type) => vec![data_type].into_iter().collect(),
+                    None => HashSet::new(),
+                };
                 Property {
                     id: standard_property_name.clone(),
                     type_: "rdf:Property".to_string(),
                     label: remove_namespace(&standard_property_name),
                     comment: String::new(),
                     domain: Vec::new(),
+                    data_types,
                 }
+            }
+
+            pub fn normalize_type_value(type_value: &str) -> Option<String> {
+                match type_value {
+                    "float" | "int" | "instant" | "boolean" | "long" | "string" => {
+                        let data_type = match type_value {
+                            "int" => "xsd:integer".to_string(),
+                            "instant" => "xsd:dateTime".to_string(),
+                            // "ref" => "xsd:anyURI".to_string(),
+                            _ => format!("xsd:{}", type_value),
+                        };
+                        Some(data_type)
+                    }
+                    "tag" => {
+                        // TODO: Figure out how to handle tag types
+                        None
+                    }
+                    _ => None,
+                }
+            }
+
+            pub fn update_types_and_own(&self, type_value: &str) -> Self {
+                let mut property = self.to_owned();
+                let data_type = Self::normalize_type_value(type_value);
+                match data_type {
+                    Some(data_type) => {
+                        property.data_types.insert(data_type);
+                    }
+                    None => {}
+                }
+                property
             }
 
             pub fn set_class_domain(&mut self, class_name: &str) {
@@ -426,23 +546,33 @@ pub mod parser {
                             property_object.comment = item["doc"].as_str().unwrap().to_string();
                         }
                         "type" => {
-                            let type_value = item["type"].as_str().unwrap();
-                            match type_value {
-                                "float" | "int" | "instant" | "boolean" | "long" | "string"
-                                | "ref" => {
-                                    let data_type = match type_value {
-                                        "int" => "xsd:integer".to_string(),
-                                        "instant" => "xsd:dateTime".to_string(),
-                                        "ref" => "xsd:anyURI".to_string(),
-                                        _ => format!("xsd:{}", type_value),
-                                    };
-                                    shacl_property.datatype =
-                                        Some(HashMap::from([("@id".to_string(), data_type)]));
+                            let property_types = &property_object.data_types;
+                            if property_types.len() > 1 {
+                                let p = &property_object.id;
+                                let c = self.target_class.get("@id").unwrap();
+                                let data_type =
+                                    Property::normalize_type_value(item["type"].as_str().unwrap())
+                                        .unwrap();
+                                let other_data_types = property_types
+                                    .iter()
+                                    .filter(|s| s != &&data_type)
+                                    .collect::<Vec<_>>();
+
+                                pretty_print(
+                                    &format!("[WARN] Inconsistent Datatype Usage: Property, \"{p}\", in class, \"{c}\", is defined with datatype, \"{data_type}\", but also used with different datatypes [{other_data_types}]. Proceeding with SHACL NodeShape but skipping \"sh:datatype\" for \"{p}\".", other_data_types = other_data_types.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")),
+                                    crossterm::style::Color::DarkYellow,
+                                    true
+                                );
+                            } else {
+                                match property_types.iter().next() {
+                                    Some(data_type) => {
+                                        shacl_property.datatype = Some(HashMap::from([(
+                                            "@id".to_string(),
+                                            data_type.to_string(),
+                                        )]));
+                                    }
+                                    None => {}
                                 }
-                                "tag" => {
-                                    // TODO: Figure out how to handle tag types
-                                }
-                                _ => {}
                             }
                         }
                         "restrictCollection" => {
