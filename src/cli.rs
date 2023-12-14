@@ -3,7 +3,9 @@ pub mod opt {
         execute,
         style::{Print, ResetColor},
     };
-    use dialoguer::{theme::ColorfulTheme, Input};
+    use dialoguer::{console::Style, theme::ColorfulTheme, Input};
+    use indicatif::ProgressBar;
+    use serde_json::{error, Value};
     use std::{
         fs::File,
         io::{self, stdout, Write},
@@ -11,7 +13,7 @@ pub mod opt {
     };
     use structopt::StructOpt;
 
-    use crate::fluree::FlureeInstance;
+    use crate::{console::pretty_print, fluree::FlureeInstance};
 
     #[derive(Debug, StructOpt)]
     #[structopt(
@@ -21,11 +23,11 @@ pub mod opt {
     pub struct Opt {
         /// Accessible URL for v2 Fluree DB. This will be used to fetch the schema and data state
         #[structopt(short, long, conflicts_with = "input")]
-        pub url: Option<String>,
+        pub source: Option<String>,
 
         /// Authorization token for Nexus ledgers
         /// e.g. 796b******854d
-        #[structopt(long, conflicts_with = "input", requires = "url")]
+        #[structopt(long, conflicts_with = "input", requires = "source")]
         pub source_auth: Option<String>,
 
         /// Output file path
@@ -35,7 +37,8 @@ pub mod opt {
         /// The v3 instance to transact resulting JSON-LD data into
         /// e.g. http://localhost:58090
         #[structopt(
-            long = "target-db",
+            short,
+            long = "target",
             conflicts_with = "output",
             conflicts_with = "print"
         )]
@@ -67,18 +70,21 @@ pub mod opt {
         pub namespace: Option<String>,
 
         /// If set, then the result vocab JSON-LD will include SHACL shapes for each class
-        #[structopt(short, long)]
+        #[structopt(long)]
         pub shacl: bool,
 
         /// If set, then the first output file will be syntax-formatted for creating a new ledger
         #[structopt(long = "create-ledger")]
         pub is_create_ledger: bool,
+
+        #[structopt(skip = ProgressBar::new(2))]
+        pub pb: ProgressBar,
     }
 
     impl Opt {
         pub fn check_url(&self, is_source: bool) -> String {
             let url = if is_source {
-                self.url.clone()
+                self.source.clone()
             } else {
                 self.target.clone()
             };
@@ -122,23 +128,74 @@ pub mod opt {
                 execute!(stdout, Print(data), ResetColor).unwrap();
                 None
             } else if self.target.is_some() {
-                let target_instance = match target_instance {
+                let mut target_instance = match target_instance {
                     None => FlureeInstance::new_target(&self),
                     Some(fi) => fi,
                 };
-                let target = self.target.as_ref().unwrap();
-                let url = format!("{}/fdb/tx", target);
-                let client = reqwest::Client::new();
-                let res = client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .body(data)
-                    .send()
-                    .await
-                    .unwrap();
 
-                let body = res.text().await.unwrap();
-                println!("{}", body);
+                let mut response_string: Option<Value> = None;
+
+                let green_bold = Style::new().green().bold();
+                let red_bold = Style::new().red().bold();
+
+                while !target_instance.is_available
+                    || !target_instance.is_authorized
+                    || response_string.is_none()
+                {
+                    if !target_instance.is_available {
+                        target_instance.prompt_fix_url();
+                    }
+
+                    if !target_instance.is_authorized {
+                        target_instance.prompt_api_key();
+                    }
+                    if self.pb.is_finished() {
+                        self.pb.reset();
+                    }
+
+                    self.pb
+                        .println(format!("{:>12} v3 Schema", green_bold.apply_to("Writing")));
+
+                    // let response_result = target_instance.issue_initial_query().await;
+                    let response_result = target_instance.v3_transact(data.clone()).await;
+
+                    let validate_attempt = target_instance.validate_result(&response_result);
+
+                    if let Err(e) = validate_attempt {
+                        self.pb
+                            .println(format!("{:>12} {}", red_bold.apply_to("ERROR"), e));
+                    }
+
+                    // let awaited_response = response_result.unwrap().text().await.unwrap();
+                    let awaited_response = match response_result {
+                        Ok(response) => response.text().await.unwrap(),
+                        Err(_) => {
+                            self.pb.finish_and_clear();
+                            continue;
+                        }
+                    };
+
+                    if target_instance.is_available && target_instance.is_authorized {
+                        // let awaited_response = response_result.unwrap().text().await.unwrap();
+                        response_string = serde_json::from_str(&awaited_response).unwrap();
+                        // println!("Response: {:?}", response_string);
+                        break;
+                    } else {
+                        let error = serde_json::from_str::<Value>(&awaited_response);
+                        if let Ok(error) = error {
+                            if let Some(error) = error["error"].as_str() {
+                                self.pb.println(format!(
+                                    "{:>12} {}",
+                                    red_bold.apply_to("ERROR"),
+                                    error
+                                ));
+                            }
+                        }
+                        self.pb.finish_and_clear();
+                        continue;
+                    }
+                }
+
                 Some(target_instance)
             } else {
                 let base_path = self.output.clone();
@@ -311,31 +368,15 @@ pub mod parser {
                 serde_json::json!(format!("{}/{}", self.network_name, self.db_name)),
             );
 
-            if opt.is_create_ledger {
-                vocab_results_map.insert(
-                    "@context".to_string(),
-                    serde_json::json!({ "f": "https://ns.flur.ee/ledger#"}),
-                );
-                vocab_results_map.insert(
-                    "@context".to_string(),
-                    Value::Object(
-                        self.context
-                            .iter()
-                            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
-                            .collect(),
-                    ),
-                );
-            } else {
-                vocab_results_map.insert(
-                    "@context".to_string(),
-                    Value::Object(
-                        self.context
-                            .iter()
-                            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
-                            .collect(),
-                    ),
-                );
-            }
+            vocab_results_map.insert(
+                "@context".to_string(),
+                Value::Object(
+                    self.context
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+                        .collect(),
+                ),
+            );
 
             vocab_results_map.insert("insert".to_string(), Value::Array(results));
 
@@ -531,7 +572,8 @@ pub mod parser {
                 property_object: &mut Property,
                 item: &Value,
                 prefix: &str,
-            ) {
+            ) -> Result<(), Vec<String>> {
+                let mut result = Ok(());
                 let mut shacl_property = ShaclProperty::new(&property_object.id);
 
                 if item["multi"].is_null() || !item["multi"].as_bool().unwrap() {
@@ -558,11 +600,16 @@ pub mod parser {
                                     .filter(|s| s != &&data_type)
                                     .collect::<Vec<_>>();
 
-                                pretty_print(
-                                    &format!("[WARN] Inconsistent Datatype Usage: Property, \"{p}\", in class, \"{c}\", is defined with datatype, \"{data_type}\", but also used with different datatypes [{other_data_types}]. Proceeding with SHACL NodeShape but skipping \"sh:datatype\" for \"{p}\".", other_data_types = other_data_types.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")),
-                                    crossterm::style::Color::DarkYellow,
-                                    true
-                                );
+                                // pretty_print(
+                                //     &format!("[WARN] Inconsistent Datatype Usage: Property, \"{p}\", in class, \"{c}\", is defined with datatype, \"{data_type}\", but also used with different datatypes [{other_data_types}]. Proceeding with SHACL NodeShape but skipping \"sh:datatype\" for \"{p}\".", other_data_types = other_data_types.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")),
+                                //     crossterm::style::Color::DarkYellow,
+                                //     true
+                                // );
+                                let error_vec = vec![
+                                    format!("Property, \"{p}\", in class, \"{c}\", is defined with datatype, \"{data_type}\", but also used with different datatypes [{other_data_types}].", other_data_types = other_data_types.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")),
+                                    format!("Proceeding with SHACL NodeShape but skipping \"sh:datatype\" for \"{p}\"."),
+                                ];
+                                result = Err(error_vec);
                             } else {
                                 match property_types.iter().next() {
                                     Some(data_type) => {
@@ -595,6 +642,7 @@ pub mod parser {
                     }
                 }
                 self.property.push(shacl_property);
+                result
             }
         }
 

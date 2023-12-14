@@ -26,6 +26,8 @@ use functions::{
 async fn main() -> Result<(), reqwest::Error> {
     let start = Instant::now();
     let green_bold = Style::new().green().bold();
+    let yellow_bold = Style::new().yellow().bold();
+    let red_bold = Style::new().red().bold();
     let opt = Opt::from_args();
 
     opt.validate_namespace_and_context();
@@ -37,8 +39,7 @@ async fn main() -> Result<(), reqwest::Error> {
 
     let mut response_string: Option<Value> = None;
 
-    let pb = ProgressBar::new(2);
-    pb.set_style(
+    opt.pb.set_style(
         ProgressStyle::with_template(
             // note that bar size is fixed unlike cargo which is dynamic
             // and also the truncation in cargo uses trailers (`...`)
@@ -51,7 +52,7 @@ async fn main() -> Result<(), reqwest::Error> {
         .unwrap()
         .progress_chars("=> "),
     );
-    pb.set_prefix("Processing Fluree v3 Vocabulary");
+    opt.pb.set_prefix("Processing Fluree v3 Vocabulary");
 
     let mut source_instance = FlureeInstance::new_source(&opt);
 
@@ -66,35 +67,40 @@ async fn main() -> Result<(), reqwest::Error> {
         if !source_instance.is_authorized {
             source_instance.prompt_api_key();
         }
-        if pb.is_finished() {
-            pb.reset();
+        if opt.pb.is_finished() {
+            opt.pb.reset();
         }
 
-        pb.println(format!(
+        opt.pb.println(format!(
             "{:>12} v2 Schema",
             green_bold.apply_to("Extracting")
         ));
-        pb.inc(1);
+        opt.pb.inc(1);
 
         let response_result = source_instance.issue_initial_query().await;
 
-        source_instance.validate_result(&response_result);
+        let validate_attempt = source_instance.validate_result(&response_result);
+
+        if let Err(e) = validate_attempt {
+            opt.pb
+                .println(format!("{:>12} {}", red_bold.apply_to("ERROR"), e));
+        }
 
         if source_instance.is_available && source_instance.is_authorized {
             let awaited_response = response_result.unwrap().text().await.unwrap();
             response_string = serde_json::from_str(&awaited_response).unwrap();
             break;
         } else {
-            pb.finish_and_clear();
+            opt.pb.finish_and_clear();
             continue;
         }
     }
 
-    pb.println(format!(
+    opt.pb.println(format!(
         "{:>12} v2 Data Modeling",
         green_bold.apply_to("Parsing")
     ));
-    pb.inc(1);
+    opt.pb.inc(1);
 
     let json = parse_current_predicates(response_string.unwrap());
 
@@ -138,7 +144,15 @@ async fn main() -> Result<(), reqwest::Error> {
 
         // TODO: if another shacl_shape in parser.shacl_shapes has the same property name, and if it has a different datatype, then I need to log a warning and I need to update the property name to be the Class/Property (e.g. Person/age and Animal/age)
 
-        class_shacl_shape.set_property(&mut property_object, item, &parser.prefix);
+        let attempt_set_property =
+            class_shacl_shape.set_property(&mut property_object, item, &parser.prefix);
+
+        if let Err(e) = attempt_set_property {
+            for error in e {
+                opt.pb
+                    .println(format!("{:>12} {}", yellow_bold.apply_to("WARNING"), error));
+            }
+        }
 
         parser
             .shacl_shapes
@@ -160,7 +174,7 @@ async fn main() -> Result<(), reqwest::Error> {
         });
     }
 
-    let _ = opt
+    let mut target_instance = opt
         .write_or_print(
             "0_vocab.jsonld",
             serde_json::to_string_pretty(&vocab_results_map).unwrap(),
@@ -192,8 +206,8 @@ async fn main() -> Result<(), reqwest::Error> {
 
     data_results_map.insert("insert".to_string(), json!([]));
 
-    pb.inc_length(query_classes.len() as u64);
-    pb.set_style(
+    opt.pb.inc_length(query_classes.len() as u64);
+    opt.pb.set_style(
         ProgressStyle::with_template(
             // note that bar size is fixed unlike cargo which is dynamic
             // and also the truncation in cargo uses trailers (`...`)
@@ -206,21 +220,25 @@ async fn main() -> Result<(), reqwest::Error> {
         .unwrap()
         .progress_chars("=> "),
     );
-    pb.set_prefix("Transforming Fluree v2 Entities");
+    opt.pb.set_prefix("Transforming Fluree v2 Entities");
 
     let temp_dir = Path::new(".tmp");
     let mut temp_file = TempFile::new(temp_dir).expect("Could not create temp file");
 
+    let mut handles = vec![];
+    let semaphore = tokio::sync::Semaphore::new(10);
+
     for class_name in query_classes {
+        let permit = semaphore.acquire().await.expect("semaphore error");
         let mut results: Vec<Value> = Vec::new();
         let mut offset: u32 = 0;
 
-        pb.println(format!(
+        opt.pb.println(format!(
             "{:>12} {} Data",
             green_bold.apply_to("Transforming"),
             case_normalize(&capitalize(&class_name))
         ));
-        pb.inc(1);
+        opt.pb.inc(1);
 
         loop {
             let query = format!(
@@ -339,11 +357,11 @@ async fn main() -> Result<(), reqwest::Error> {
         vec_parsed_results.clear();
 
         if result_size > 2_500_000 {
-            let _ = opt
+            target_instance = opt
                 .write_or_print(
                     format!("{}_data.jsonld", file_num),
                     serde_json::to_string_pretty(&data_results_map).unwrap(),
-                    None,
+                    target_instance,
                 )
                 .await;
 
@@ -365,15 +383,23 @@ async fn main() -> Result<(), reqwest::Error> {
         .write_or_print(
             format!("{}_data.jsonld", file_num),
             serde_json::to_string_pretty(&data_results_map).unwrap(),
-            None,
+            target_instance,
         )
         .await;
 
-    pb.finish_and_clear();
+    opt.pb.finish_and_clear();
 
-    let finish_line = match opt.print {
-        false => format!("to {}/ ", opt.output.to_str().unwrap()),
-        true => "".to_string(),
+    let (output, target) = (opt.output, opt.target);
+
+    // let finish_line = match opt.print {
+    //     false => format!("to {}/ ", opt.output.to_str().unwrap()),
+    //     true => "".to_string(),
+    // };
+
+    let finish_line = match (output, target) {
+        (_, Some(target)) => format!("to Target Ledger [{}] ", target),
+        (output, _) => format!("to {}/ ", output.to_str().unwrap()),
+        _ => "".to_string(),
     };
     println!(
         "{:>12} v3 Migration {}in {}",
