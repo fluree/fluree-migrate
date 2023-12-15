@@ -1,11 +1,14 @@
+use crossterm::style::Color;
 use dialoguer::console::{Style, Term};
-use indicatif::{HumanDuration, ProgressBar, ProgressStyle};
+use indicatif::{HumanDuration, ProgressStyle};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::vec;
+use std::{collections::HashMap, sync::Arc};
 use structopt::StructOpt;
+use tokio::sync::Mutex;
 
 mod cli;
 mod console;
@@ -15,6 +18,7 @@ mod functions;
 use cli::opt::Opt;
 use cli::parser::Parser;
 use cli::temp_files::TempFile;
+use console::pretty_print;
 use fluree::FlureeInstance;
 use functions::{
     capitalize, case_normalize, instant_to_iso_string, parse_current_predicates,
@@ -50,6 +54,7 @@ async fn main() -> Result<(), reqwest::Error> {
             },
         )
         .unwrap()
+        // .tick_strings(&["🌲", "🎄", "🎄"])
         .progress_chars("=> "),
     );
     opt.pb.set_prefix("Processing Fluree v3 Vocabulary");
@@ -223,76 +228,204 @@ async fn main() -> Result<(), reqwest::Error> {
     opt.pb.set_prefix("Transforming Fluree v2 Entities");
 
     let temp_dir = Path::new(".tmp");
-    let mut temp_file = TempFile::new(temp_dir).expect("Could not create temp file");
+    let temp_file = TempFile::new(temp_dir).expect("Could not create temp file");
+    let temp_file = Arc::new(Mutex::new(temp_file));
 
     let mut handles = vec![];
     let semaphore = tokio::sync::Semaphore::new(10);
+    let shared_fluree_instance = Arc::new(source_instance);
+    let (output, target) = (opt.output.clone(), opt.target.clone());
+
+    // processing should be a vec of the first 4 class names in query_classes
+    let print_classes = query_classes
+        .iter()
+        .map(|x| x.to_owned())
+        .take(4)
+        .collect::<Vec<String>>();
+    let message = print_classes.join(", ");
+    let full_message = if print_classes.len() > 3 {
+        format!("[{}...]", message)
+    } else if print_classes.len() > 0 {
+        format!("[{}]", message)
+    } else {
+        "".to_string()
+    };
+    opt.pb.set_message(full_message);
+
+    let shared_opt = Arc::new(opt);
+    let entity_map: HashMap<String, HashSet<i64>> = HashMap::new();
+    let shared_entity_map = Arc::new(Mutex::new(entity_map));
+    let processing = Arc::new(Mutex::new(
+        query_classes
+            .iter()
+            .map(|x| x.to_owned())
+            .collect::<Vec<String>>(),
+    ));
 
     for class_name in query_classes {
         let permit = semaphore.acquire().await.expect("semaphore error");
-        let mut results: Vec<Value> = Vec::new();
-        let mut offset: u32 = 0;
 
-        opt.pb.println(format!(
-            "{:>12} {} Data",
-            green_bold.apply_to("Transforming"),
-            case_normalize(&capitalize(&class_name))
-        ));
-        opt.pb.inc(1);
+        let handle = tokio::task::spawn({
+            let source_instance = Arc::clone(&shared_fluree_instance);
+            let temp_file = Arc::clone(&temp_file);
+            let class_name = class_name.clone();
+            let opt = Arc::clone(&shared_opt);
+            let green_bold = Style::new().green().bold();
+            let entity_map = Arc::clone(&shared_entity_map);
+            let processing = Arc::clone(&processing);
+            async move {
+                let mut results: Vec<Value> = Vec::new();
+                let mut offset: u32 = 0;
 
-        loop {
-            let query = format!(
-                r#"{{
-                    "selectDistinct": ["*"],
+                loop {
+                    let query = format!(
+                        r#"{{
+                    "select": ["*"],
                     "from": "{}",
                     "opts": {{
                         "compact": true,
-                        "limit": 2000,
+                        "limit": 5000,
                         "fuel": 9999999999,
                         "offset": {}
                     }}
                 }}"#,
-                class_name, offset
-            );
+                        class_name, offset
+                    );
+                    let response_result = source_instance.issue_data_query(query).await;
+                    let response = response_result.unwrap().text().await.unwrap();
 
-            let response_result = source_instance.issue_data_query(query).await;
-            let response = response_result.unwrap().text().await.unwrap();
+                    let response: Value = match serde_json::from_str(&response) {
+                        Ok(response) => response,
+                        Err(e) => {
+                            pretty_print(&format!("[ERROR] {}", e), Color::DarkRed, true);
+                            pretty_print(
+                                &format!("Fluree Response: {}", response),
+                                Color::DarkRed,
+                                true,
+                            );
+                            serde_json::json!([])
+                        }
+                    };
+                    let response = response.as_array().unwrap();
 
-            let response: Value = serde_json::from_str(&response).unwrap();
-            let response = response.as_array().unwrap();
+                    let mut entity_map_guard = entity_map.lock().await;
 
-            if response.len() == 0 {
-                temp_file
-                    .write(&class_name, &results)
-                    .expect(format!("Issue writing file for {}", class_name).as_str());
-                results.clear();
-                break;
+                    // let class_hash_set = entity_map_guard
+                    //     .entry(class_name.clone())
+                    //     .or_insert_with(HashSet::new);
+                    let response_entity_ids = response
+                        .iter()
+                        .map(|value| value["_id"].as_i64().unwrap())
+                        .collect::<HashSet<i64>>();
+
+                    let all_entities_already_exist =
+                        if let Some(class_hash_set) = entity_map_guard.get_mut(&class_name) {
+                            let result = class_hash_set.is_superset(&response_entity_ids);
+                            class_hash_set.extend(response_entity_ids);
+                            result
+                        } else {
+                            entity_map_guard.insert(class_name.clone(), response_entity_ids);
+                            false
+                        };
+
+                    drop(entity_map_guard);
+
+                    if response.len() == 0 || all_entities_already_exist {
+                        temp_file
+                            .lock()
+                            .await
+                            .write(&class_name, &results)
+                            .expect(format!("Issue writing file for {}", class_name).as_str());
+                        results.clear();
+                        break;
+                    }
+
+                    results = match offset {
+                        0 => response.to_owned(),
+                        _ => results.into_iter().chain(response.to_owned()).collect(),
+                    };
+
+                    let results_length = results.len();
+
+                    if results_length > 12_500 {
+                        temp_file.lock().await.write(&class_name, &results).expect(
+                            format!("Issue writing file for {} at offset {}", class_name, offset)
+                                .as_str(),
+                        );
+                        results.clear();
+                    }
+
+                    offset += 5000;
+                }
+
+                let mut processing_guard = processing.lock().await;
+                opt.pb.println(format!(
+                    "{:>12} {} Data",
+                    green_bold.apply_to("Transforming"),
+                    case_normalize(&capitalize(&class_name))
+                ));
+                opt.pb.inc(1);
+                processing_guard.retain(|x| x != &class_name);
+                let print_classes = processing_guard
+                    .iter()
+                    .map(|x| x.to_owned())
+                    .take(4)
+                    .collect::<Vec<String>>();
+                let message = print_classes.join(", ");
+                let full_message = if print_classes.len() > 3 {
+                    format!("[{}...]", message)
+                } else if print_classes.len() > 0 {
+                    format!("[{}]", message)
+                } else {
+                    "".to_string()
+                };
+                opt.pb.set_message(full_message);
+                drop(processing_guard);
             }
-
-            results = match offset {
-                0 => response.to_owned(),
-                _ => results.into_iter().chain(response.to_owned()).collect(),
-            };
-
-            let results_length = results.len();
-
-            if results_length > 5_000 {
-                temp_file.write(&class_name, &results).expect(
-                    format!("Issue writing file for {} at offset {}", class_name, offset).as_str(),
-                );
-                results.clear();
-            }
-
-            offset += 2000;
-        }
+        });
+        drop(permit);
+        handles.push(handle);
     }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
     let mut vec_parsed_results = Vec::new();
-    let files = temp_file.get_files().expect("Could not get files");
+    let files = temp_file
+        .lock()
+        .await
+        .get_files()
+        .expect("Could not get files");
 
     let mut result_size: u64 = 0;
     let mut file_num: u64 = 1;
 
-    for file in files {
+    let opt = Arc::clone(&shared_opt);
+    opt.pb.reset();
+    opt.pb.inc_length(files.len() as u64);
+    opt.pb.enable_steady_tick(Duration::from_millis(400));
+    opt.pb.set_message(format!("{:3}%", 100 * 1 / files.len()));
+    opt.pb.set_style(
+        ProgressStyle::with_template(
+            // note that bar size is fixed unlike cargo which is dynamic
+            // and also the truncation in cargo uses trailers (`...`)
+            if Term::stdout().size().1 > 80 {
+                "{prefix:>12.cyan.bold} [{bar:57}]{msg}  {spinner:.white}"
+            } else {
+                "{prefix:>12.cyan.bold} [{bar:57}]{msg}"
+            },
+        )
+        .unwrap()
+        .tick_strings(&["🌲🎄🌲", "🎄🌲🎄", "🎄🎄🎄"])
+        .progress_chars("=> "),
+    );
+    opt.pb.set_prefix("Writing v3 Data");
+
+    for (index, file) in files.iter().enumerate() {
+        opt.pb.inc(1);
+        opt.pb
+            .set_message(format!("{:3}%", 100 * (index + 1) / files.len()));
         result_size += file.metadata().expect("Could not get metadata").len();
 
         let file_bytes = std::fs::read(&file).expect("Could not read file");
@@ -340,7 +473,15 @@ async fn main() -> Result<(), reqwest::Error> {
                         true => json!(instant_to_iso_string(value.as_i64().unwrap())),
                         false => value.to_owned(),
                     };
-                    parsed_result.insert(key, represent_fluree_value(&value));
+                    let ref_type = match shacl_properties.iter().find(|&x| {
+                        let shacl_path = x.path.get("@id").unwrap();
+                        let shacl_class = x.class.is_some();
+                        (shacl_path == &key) && shacl_class
+                    }) {
+                        Some(x) => Some(x.class.clone().unwrap().get("@id").unwrap().to_string()),
+                        None => None,
+                    };
+                    parsed_result.insert(key, represent_fluree_value(&value, ref_type));
                 }
             }
             vec_parsed_results.push(json!(parsed_result));
@@ -357,7 +498,7 @@ async fn main() -> Result<(), reqwest::Error> {
         vec_parsed_results.clear();
 
         if result_size > 2_500_000 {
-            target_instance = opt
+            target_instance = shared_opt
                 .write_or_print(
                     format!("{}_data.jsonld", file_num),
                     serde_json::to_string_pretty(&data_results_map).unwrap(),
@@ -379,7 +520,7 @@ async fn main() -> Result<(), reqwest::Error> {
     }
     std::fs::remove_dir_all(temp_dir).expect("Could not remove temp directory");
 
-    let _ = opt
+    let _ = shared_opt
         .write_or_print(
             format!("{}_data.jsonld", file_num),
             serde_json::to_string_pretty(&data_results_map).unwrap(),
@@ -387,9 +528,7 @@ async fn main() -> Result<(), reqwest::Error> {
         )
         .await;
 
-    opt.pb.finish_and_clear();
-
-    let (output, target) = (opt.output, opt.target);
+    shared_opt.pb.finish_and_clear();
 
     // let finish_line = match opt.print {
     //     false => format!("to {}/ ", opt.output.to_str().unwrap()),
@@ -399,7 +538,6 @@ async fn main() -> Result<(), reqwest::Error> {
     let finish_line = match (output, target) {
         (_, Some(target)) => format!("to Target Ledger [{}] ", target),
         (output, _) => format!("to {}/ ", output.to_str().unwrap()),
-        _ => "".to_string(),
     };
     println!(
         "{:>12} v3 Migration {}in {}",

@@ -6,7 +6,7 @@ use dialoguer::{theme::ColorfulTheme, Input};
 use reqwest::{header::HeaderMap, Client, Error, Response};
 
 use crate::cli::opt::Opt;
-use crate::console::{pretty_print, ERROR_COLOR};
+use crate::console::ERROR_COLOR;
 
 const SCHEMA_QUERY: &str = r#"{
     "initial_predicates": {

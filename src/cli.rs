@@ -5,7 +5,7 @@ pub mod opt {
     };
     use dialoguer::{console::Style, theme::ColorfulTheme, Input};
     use indicatif::ProgressBar;
-    use serde_json::{error, Value};
+    use serde_json::Value;
     use std::{
         fs::File,
         io::{self, stdout, Write},
@@ -13,7 +13,7 @@ pub mod opt {
     };
     use structopt::StructOpt;
 
-    use crate::{console::pretty_print, fluree::FlureeInstance};
+    use crate::fluree::FlureeInstance;
 
     #[derive(Debug, StructOpt)]
     #[structopt(
@@ -133,7 +133,7 @@ pub mod opt {
                     Some(fi) => fi,
                 };
 
-                let mut response_string: Option<Value> = None;
+                let response_string: Option<Value> = None;
 
                 let green_bold = Style::new().green().bold();
                 let red_bold = Style::new().red().bold();
@@ -153,8 +153,14 @@ pub mod opt {
                         self.pb.reset();
                     }
 
-                    self.pb
-                        .println(format!("{:>12} v3 Schema", green_bold.apply_to("Writing")));
+                    let is_vocab_file = file_name.as_ref().to_str().unwrap().contains("vocab");
+
+                    if is_vocab_file {
+                        self.pb.println(format!(
+                            "{:>12} Vocab Data to v3 Ledger",
+                            green_bold.apply_to("Transacting")
+                        ));
+                    };
 
                     // let response_result = target_instance.issue_initial_query().await;
                     let response_result = target_instance.v3_transact(data.clone()).await;
@@ -177,7 +183,7 @@ pub mod opt {
 
                     if target_instance.is_available && target_instance.is_authorized {
                         // let awaited_response = response_result.unwrap().text().await.unwrap();
-                        response_string = serde_json::from_str(&awaited_response).unwrap();
+                        // response_string = serde_json::from_str(&awaited_response).unwrap();
                         // println!("Response: {:?}", response_string);
                         break;
                     } else {
@@ -224,6 +230,7 @@ pub mod temp_files {
 
     use serde_json::Value;
 
+    #[derive(Debug)]
     pub struct TempFile {
         directory: PathBuf,
         current_file: Option<File>,
@@ -420,9 +427,8 @@ pub mod parser {
         use serde::{Deserialize, Serialize};
         use serde_json::Value;
 
-        use crate::{
-            console::pretty_print,
-            functions::{remove_namespace, standardize_class_name, standardize_property_name},
+        use crate::functions::{
+            remove_namespace, standardize_class_name, standardize_property_name,
         };
 
         #[derive(Debug, Clone, Deserialize, Serialize)]

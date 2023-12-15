@@ -18,13 +18,20 @@ pub fn instant_to_iso_string(epoch: i64) -> String {
     date_time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-pub fn represent_fluree_value(value: &Value) -> Value {
+pub fn represent_fluree_value(value: &Value, ref_type: Option<String>) -> Value {
     match value {
-        Value::Object(value) => serde_json::json!({ "@id": value["_id"].to_string() }),
+        Value::Object(value) => {
+            let mut json = serde_json::json!({});
+            json["@id"] = value["_id"].to_string().into();
+            if let Some(ref_type) = ref_type {
+                json["@type"] = ref_type.into();
+            }
+            json
+        }
         Value::Array(value) => {
             let mut array: Vec<Value> = Vec::new();
             for item in value {
-                array.push(represent_fluree_value(item));
+                array.push(represent_fluree_value(item, ref_type.clone()));
             }
             Value::Array(array)
         }
