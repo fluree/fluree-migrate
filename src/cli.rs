@@ -17,7 +17,7 @@ pub mod opt {
 
     #[derive(Debug, StructOpt)]
     #[structopt(
-        name = "jsonld",
+        name = "fluree-migrate",
         about = "Converts Fluree v2 schema JSON to Fluree v3 JSON-LD"
     )]
     pub struct Opt {
@@ -25,17 +25,20 @@ pub mod opt {
         #[structopt(short, long, conflicts_with = "input")]
         pub source: Option<String>,
 
-        /// Authorization token for Nexus ledgers
+        /// Authorization token for Nexus ledgers.
         /// e.g. 796b******854d
         #[structopt(long, conflicts_with = "input", requires = "source")]
         pub source_auth: Option<String>,
 
-        /// Output file path
+        /// If writing the output to local files,
+        /// then this is the relative path to the directory where the files will be written.
+        /// [Conflicts with --target & --print]
         #[structopt(short, long, parse(from_os_str), default_value = "output")]
         pub output: PathBuf,
 
-        /// The v3 instance to transact resulting JSON-LD data into
+        /// If transacting the output to a target v3 Fluree instance, this is the URL for that instance.
         /// e.g. http://localhost:58090
+        /// [Conflicts with --output & --print]
         #[structopt(
             short,
             long = "target",
@@ -44,32 +47,34 @@ pub mod opt {
         )]
         pub target: Option<String>,
 
-        /// Authorization token for the target v3 instance (if hosted on Nexus)
+        /// Authorization token for the target v3 instance (if hosted on Nexus).
+        /// Only useful if transacting the output to a target v3 Fluree instance.
         #[structopt(long, requires = "target")]
         pub target_auth: Option<String>,
 
-        /// If set, then the output will be printed to stdout instead of written to local files (Conflicts with --output)
+        /// If set, then the output will be printed to stdout instead of written to local files or to a target v3 instance.
+        /// [Conflicts with --output & --target]
         #[structopt(long, conflicts_with = "output", conflicts_with = "target")]
         pub print: bool,
 
-        /// @base value for @context
-        /// e.g. http://flur.ee/ids/
-        /// This will be used as a default IRI prefix for all data entities
+        /// @base value for @context.
+        /// This will be used as a default IRI prefix for all data entities.
+        /// e.g. http://example.org/ids/
         #[structopt(short, long)]
         pub base: Option<String>,
 
-        /// @vocab value for @context
-        /// e.g. http://flur.ee/terms/
-        /// This will be used as a default IRI prefix for all vocab entities
+        /// @vocab value for @context.
+        /// This will be used as a default IRI prefix for all vocab entities.
+        /// e.g. http://example.org/terms/
         #[structopt(short, long)]
         pub vocab: Option<String>,
 
-        /// If set, then the result vocab JSON-LD will include SHACL shapes for each class
+        /// If set, then the result vocab JSON-LD will include SHACL shapes for each class.
         #[structopt(long)]
         pub shacl: bool,
 
-        /// This depends on the --shacl flag being used
-        /// If set, then the resulting SHACL shapes will be "closed" (i.e. no additional properties can be added to instances of the class)
+        /// This depends on the --shacl flag being used.
+        /// If set, then the resulting SHACL shapes will be "closed" (i.e. no additional properties can be added to instances of the class).
         #[structopt(long = "closed-shapes", requires = "shacl")]
         pub closed_shapes: bool,
 
@@ -77,7 +82,7 @@ pub mod opt {
         /// If set, then the first transaction issued against the target will attempt to create the ledger
         #[structopt(long = "create-ledger", requires = "target")]
         pub is_create_ledger: bool,
-        // TODO: Implement this correctly
+
         #[structopt(skip = ProgressBar::new(2))]
         pub pb: ProgressBar,
     }
