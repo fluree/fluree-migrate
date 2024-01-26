@@ -81,7 +81,7 @@ fluree-migrate --target http://localhost:58090 --create-ledger
 
 ### Options
 
-#### `--output`
+#### `--output` (`-o`)
 
 This option is used to specify the relative path to the directory where the output files will be written. If a value is not provided on `--output`, then the tool will default to writing the output to a directory named `output/` in the current working directory.
 
@@ -91,7 +91,7 @@ Writing to a local directory is the default behavior of the tool. The alternativ
 fluree-migrate --output output
 ```
 
-#### `--source`
+#### `--source` (`-s`)
 
 This option is used to specify the URL of the existing Fluree v2 ledger to migrate from. If this is hosted on Fluree's Cloud platform, then you will also need to provide an API Key with which to access that ledger.
 
@@ -111,7 +111,7 @@ If a value is not provided on `--source-auth`, then the tool will prompt you for
 fluree-migrate --source https://api.dev.flur.ee/fdb/fluree/387028092977569 --source-auth 796b******854d
 ```
 
-#### `--target`
+#### `--target` (`-t`)
 
 This option is used to specify the URL of the target v3 Fluree instance to transact the migrated data to. It is an alternative to using `--output` to write the data to local files or to using `--print` to print the data to stdout.
 
@@ -129,7 +129,7 @@ If a value is not provided on `--target-auth`, then the tool will prompt you for
 fluree-migrate --target https://data.flur.ee/fluree --target-auth 796b******854d
 ```
 
-#### `--base`
+#### `--base` (`-b`)
 
 This option is used to specify the `@base` value for the @context of the output JSON-LD. This will be used as a default IRI prefix for all data entities (e.g. `http://example.org/ids/`).
 
@@ -139,7 +139,7 @@ If a value is not provided on `--base`, then the tool will default to using the 
 fluree-migrate --base http://example.org/ids/
 ```
 
-#### `--vocab`
+#### `--vocab` (`-v`)
 
 This option is used to specify the `@vocab` value for the @context of the output JSON-LD. This will be used as a default IRI prefix for all vocab entities (e.g. `http://example.org/terms/`).
 
