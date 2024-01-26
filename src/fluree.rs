@@ -179,7 +179,7 @@ impl FlureeInstance {
         (self.is_available, self.is_authorized) = match result {
             Ok(response) => match response.status() {
                 reqwest::StatusCode::OK | reqwest::StatusCode::CREATED => (true, true),
-                reqwest::StatusCode::UNAUTHORIZED => {
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
                     match self.api_key {
                         Some(_) => {
                             final_result = Err(format!("The API Key you provided is not authorized to access this database. Please try again."));

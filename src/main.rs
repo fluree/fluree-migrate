@@ -34,14 +34,9 @@ async fn main() -> Result<(), reqwest::Error> {
     let red_bold = Style::new().red().bold();
     let opt = Opt::from_args();
 
-    opt.validate_namespace_and_context();
-
-    let prefix = match opt.namespace.clone() {
-        Some(namespace) => format!("{}:", namespace),
-        None => "".to_string(),
-    };
-
     let mut response_string: Option<Value> = None;
+
+    let mut source_instance = FlureeInstance::new_source(&opt);
 
     opt.pb.set_style(
         ProgressStyle::with_template(
@@ -58,8 +53,6 @@ async fn main() -> Result<(), reqwest::Error> {
         .progress_chars("=> "),
     );
     opt.pb.set_prefix("Processing Fluree v3 Vocabulary");
-
-    let mut source_instance = FlureeInstance::new_source(&opt);
 
     while !source_instance.is_available
         || !source_instance.is_authorized
@@ -109,7 +102,7 @@ async fn main() -> Result<(), reqwest::Error> {
 
     let json = parse_current_predicates(response_string.unwrap());
 
-    let mut parser = Parser::new(prefix, &opt, &source_instance);
+    let mut parser = Parser::new(&opt, &source_instance);
 
     let json_results = json.as_array().unwrap();
 
@@ -139,18 +132,18 @@ async fn main() -> Result<(), reqwest::Error> {
 
         let mut property_object = parser.get_or_create_property(&orig_property_name, type_value);
 
-        let class_name = standardize_class_name(&orig_class_name, &parser.prefix);
-        let property_name = standardize_property_name(&orig_property_name, &parser.prefix);
+        let class_name = standardize_class_name(&orig_class_name);
+        let property_name = standardize_property_name(&orig_property_name);
 
-        let mut class_shacl_shape = parser.get_or_create_shacl_shape(&class_name);
+        let mut class_shacl_shape =
+            parser.get_or_create_shacl_shape(&class_name, opt.closed_shapes);
 
         class_object.set_property_range(&property_name);
         property_object.set_class_domain(&class_name);
 
         // TODO: if another shacl_shape in parser.shacl_shapes has the same property name, and if it has a different datatype, then I need to log a warning and I need to update the property name to be the Class/Property (e.g. Person/age and Animal/age)
 
-        let attempt_set_property =
-            class_shacl_shape.set_property(&mut property_object, item, &parser.prefix);
+        let attempt_set_property = class_shacl_shape.set_property(&mut property_object, item);
 
         if let Err(e) = attempt_set_property {
             for error in e {
@@ -202,7 +195,7 @@ async fn main() -> Result<(), reqwest::Error> {
         "@context".to_string(),
         Value::Object(
             parser
-                .context
+                .data_context
                 .iter()
                 .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
                 .collect(),

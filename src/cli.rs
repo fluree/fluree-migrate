@@ -58,25 +58,26 @@ pub mod opt {
         #[structopt(short, long)]
         pub base: Option<String>,
 
-        /// @context value(s) -- multiple values can be provided
-        /// e.g. -c schema=http://schema.org/ -c ex=http://example.org/
+        /// @vocab value for @context
+        /// e.g. http://flur.ee/terms/
+        /// This will be used as a default IRI prefix for all vocab entities
         #[structopt(short, long)]
-        pub context: Option<Vec<String>>,
-
-        /// @context namespace to use for new classes and properties
-        /// This depends on at least one @context term being introduce with -c
-        /// e.g. -c ex=http://example.org/ -n ex
-        #[structopt(short, long, requires = "context")]
-        pub namespace: Option<String>,
+        pub vocab: Option<String>,
 
         /// If set, then the result vocab JSON-LD will include SHACL shapes for each class
         #[structopt(long)]
         pub shacl: bool,
 
-        /// If set, then the first output file will be syntax-formatted for creating a new ledger
-        #[structopt(long = "create-ledger")]
-        pub is_create_ledger: bool,
+        /// This depends on the --shacl flag being used
+        /// If set, then the resulting SHACL shapes will be "closed" (i.e. no additional properties can be added to instances of the class)
+        #[structopt(long = "closed-shapes", requires = "shacl")]
+        pub closed_shapes: bool,
 
+        /// This depends on the --target flag being used.
+        /// If set, then the first transaction issued against the target will attempt to create the ledger
+        #[structopt(long = "create-ledger", requires = "target")]
+        pub is_create_ledger: bool,
+        // TODO: Implement this correctly
         #[structopt(skip = ProgressBar::new(2))]
         pub pb: ProgressBar,
     }
@@ -105,12 +106,6 @@ pub mod opt {
                     })
                     .interact_text()
                     .unwrap(),
-            }
-        }
-
-        pub fn validate_namespace_and_context(&self) {
-            if self.namespace.is_some() && self.context.is_none() {
-                panic!("You must specify a context when using the --namespace (-n) flag\n\nExample: -c schema=http://schema.org/ -n schema");
             }
         }
 
@@ -307,7 +302,7 @@ pub mod parser {
 
     use crate::{
         fluree::FlureeInstance,
-        functions::{create_context, standardize_class_name},
+        functions::{create_data_context, create_vocab_context, standardize_class_name},
     };
 
     use self::jsonld::{Class, Property, ShaclShape};
@@ -318,21 +313,20 @@ pub mod parser {
         pub classes: HashMap<String, Class>,
         pub properties: HashMap<String, Property>,
         pub shacl_shapes: HashMap<String, ShaclShape>,
-        pub prefix: String,
-        pub context: HashMap<String, String>,
+        pub vocab_context: HashMap<String, String>,
+        pub data_context: HashMap<String, String>,
         pub network_name: String,
         pub db_name: String,
     }
 
     impl Parser {
-        pub fn new(prefix: String, opt: &Opt, source_instance: &FlureeInstance) -> Self {
-            let context = create_context(opt, source_instance);
+        pub fn new(opt: &Opt, source_instance: &FlureeInstance) -> Self {
             Parser {
                 classes: HashMap::new(),
                 properties: HashMap::new(),
                 shacl_shapes: HashMap::new(),
-                prefix,
-                context,
+                vocab_context: create_vocab_context(opt, source_instance),
+                data_context: create_data_context(opt, source_instance),
                 network_name: source_instance.network_name.to_owned(),
                 db_name: source_instance.db_name.to_owned(),
             }
@@ -378,7 +372,7 @@ pub mod parser {
             vocab_results_map.insert(
                 "@context".to_string(),
                 Value::Object(
-                    self.context
+                    self.vocab_context
                         .iter()
                         .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
                         .collect(),
@@ -391,7 +385,7 @@ pub mod parser {
         }
 
         pub fn get_or_create_class(&self, orig_class_name: &str) -> Class {
-            let class_name = &standardize_class_name(orig_class_name, &self.prefix);
+            let class_name = &standardize_class_name(orig_class_name);
             let class_object = self.classes.get(orig_class_name);
             let class_object = match class_object {
                 Some(class_object) => class_object.to_owned(),
@@ -404,16 +398,20 @@ pub mod parser {
             let property_object = self.properties.get(property_name);
             let property_object = match property_object {
                 Some(property_object) => property_object.update_types_and_own(type_value),
-                None => Property::new(property_name, &self.prefix, type_value),
+                None => Property::new(property_name, type_value),
             };
             property_object
         }
 
-        pub fn get_or_create_shacl_shape(&self, class_name: &str) -> ShaclShape {
+        pub fn get_or_create_shacl_shape(
+            &self,
+            class_name: &str,
+            closed_shapes: bool,
+        ) -> ShaclShape {
             let shacl_shape = self.shacl_shapes.get(class_name);
             let shacl_shape = match shacl_shape {
                 Some(shacl_shape) => shacl_shape.to_owned(),
-                None => ShaclShape::new(class_name),
+                None => ShaclShape::new(class_name, closed_shapes),
             };
             shacl_shape
         }
@@ -484,8 +482,8 @@ pub mod parser {
         }
 
         impl Property {
-            pub fn new(property_name: &str, prefix: &str, type_value: &str) -> Self {
-                let standard_property_name = standardize_property_name(property_name, prefix);
+            pub fn new(property_name: &str, type_value: &str) -> Self {
+                let standard_property_name = standardize_property_name(property_name);
                 let data_type = Self::normalize_type_value(type_value);
                 let data_types: HashSet<String> = match data_type {
                     Some(data_type) => vec![data_type].into_iter().collect(),
@@ -554,10 +552,26 @@ pub mod parser {
             pub datatype: String,
             #[serde(rename = "sh:nodeKind", skip_serializing_if = "String::is_empty")]
             pub node_kind: String,
+            #[serde(rename = "sh:closed", skip_serializing_if = "Option::is_none")]
+            pub closed: Option<bool>,
+            #[serde(rename = "sh:ignoredProperties", skip_serializing_if = "Vec::is_empty")]
+            pub ignored_properties: Vec<HashMap<String, String>>,
         }
 
         impl ShaclShape {
-            pub fn new(class_name: &str) -> Self {
+            pub fn new(class_name: &str, closed: bool) -> Self {
+                let closed = match closed {
+                    true => Some(true),
+                    false => None,
+                };
+                let ignored_properties = match closed {
+                    Some(true) => {
+                        let mut map = HashMap::new();
+                        map.insert("@id".to_string(), "@type".to_string());
+                        vec![map]
+                    }
+                    _ => Vec::new(),
+                };
                 ShaclShape {
                     id: String::new(),
                     type_: "sh:NodeShape".to_string(),
@@ -570,6 +584,8 @@ pub mod parser {
                     property: Vec::new(),
                     datatype: String::new(),
                     node_kind: String::new(),
+                    closed,
+                    ignored_properties,
                 }
             }
 
@@ -577,7 +593,6 @@ pub mod parser {
                 &mut self,
                 property_object: &mut Property,
                 item: &Value,
-                prefix: &str,
             ) -> Result<(), Vec<String>> {
                 let mut result = Ok(());
                 let mut shacl_property = ShaclProperty::new(&property_object.id);
@@ -633,7 +648,6 @@ pub mod parser {
                                 "@id".to_string(),
                                 standardize_class_name(
                                     item["restrictCollection"].as_str().unwrap(),
-                                    &prefix,
                                 ),
                             )]));
                         }

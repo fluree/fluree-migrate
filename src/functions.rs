@@ -87,20 +87,15 @@ pub fn capitalize(string: &str) -> String {
     }
 }
 
-pub fn add_prefix(string: &str, prefix: &str) -> String {
-    format!("{}{}", prefix, string)
-}
-
-pub fn standardize_class_name(string: &str, prefix: &str) -> String {
+pub fn standardize_class_name(string: &str) -> String {
     let string = remove_namespace(string);
     let string = capitalize(&string);
     let string = case_normalize(&string);
-    add_prefix(&string, prefix)
+    string
 }
 
-pub fn standardize_property_name(string: &str, prefix: &str) -> String {
-    let string = case_normalize(string);
-    add_prefix(&string, prefix)
+pub fn standardize_property_name(string: &str) -> String {
+    case_normalize(string)
 }
 
 pub fn parse_current_predicates(json: Value) -> Value {
@@ -132,31 +127,54 @@ pub fn parse_current_predicates(json: Value) -> Value {
     serde_json::json!(current_predicates)
 }
 
-pub fn parse_contexts(contexts: &Vec<String>) -> HashMap<String, String> {
-    let mut context = HashMap::<String, String>::new();
-    for context_string in contexts {
-        let mut context_parts = context_string.split("=");
-        let context_key = context_parts.next().expect("When using --context (-c), you must specify a key and value separated by an equals sign (e.g. --context schema=http://schema.org/)");
-        let context_value = context_parts.next().expect("When using --context (-c), you must specify a key and value separated by an equals sign (e.g. --context schema=http://schema.org/)");
-        context.insert(context_key.to_string(), context_value.to_string());
-    }
-    context
-}
-
-pub fn create_context(opt: &Opt, source_instance: &FlureeInstance) -> HashMap<String, String> {
+pub fn create_context(
+    opt: &Opt,
+    source_instance: &FlureeInstance,
+    is_vocab: bool,
+) -> HashMap<String, String> {
     let mut context: HashMap<String, String> = HashMap::new();
-    if let Some(contexts) = &opt.context {
-        context = parse_contexts(&contexts);
-    }
 
-    match &opt.base {
-        Some(base) => {
-            context.insert("@base".to_string(), base.clone());
+    match (&opt.base, &opt.vocab) {
+        (Some(base), Some(vocab)) => {
+            if is_vocab {
+                context.insert("@base".to_string(), vocab.clone());
+            } else {
+                context.insert("@base".to_string(), base.clone());
+                context.insert("@vocab".to_string(), vocab.clone());
+            }
         }
-        None => {
-            if opt.namespace.is_none() {
+        (Some(base), None) => {
+            if is_vocab {
                 context.insert(
                     "@base".to_string(),
+                    format!("{}/terms/", source_instance.url),
+                );
+            } else {
+                context.insert("@base".to_string(), base.clone());
+                context.insert(
+                    "@vocab".to_string(),
+                    format!("{}/terms/", source_instance.url),
+                );
+            }
+        }
+        (None, Some(vocab)) => {
+            if is_vocab {
+                context.insert("@base".to_string(), vocab.clone());
+            } else {
+                context.insert("@base".to_string(), format!("{}/ids/", source_instance.url));
+                context.insert("@vocab".to_string(), vocab.clone());
+            }
+        }
+        (None, None) => {
+            if is_vocab {
+                context.insert(
+                    "@base".to_string(),
+                    format!("{}/terms/", source_instance.url),
+                );
+            } else {
+                context.insert("@base".to_string(), format!("{}/ids/", source_instance.url));
+                context.insert(
+                    "@vocab".to_string(),
                     format!("{}/terms/", source_instance.url),
                 );
             }
@@ -181,6 +199,17 @@ pub fn create_context(opt: &Opt, source_instance: &FlureeInstance) -> HashMap<St
     );
     context.insert("f".to_string(), "https://ns.flur.ee/ledger#".to_string());
     context
+}
+
+pub fn create_data_context(opt: &Opt, source_instance: &FlureeInstance) -> HashMap<String, String> {
+    create_context(opt, source_instance, false)
+}
+
+pub fn create_vocab_context(
+    opt: &Opt,
+    source_instance: &FlureeInstance,
+) -> HashMap<String, String> {
+    create_context(opt, source_instance, true)
 }
 
 pub fn parse_for_class_and_property_name(item: &Value) -> (String, String) {
