@@ -4,9 +4,11 @@
 
 ## Installation
 
-Ensure you have `cargo` installed on your machine. You can install `cargo` by following the instructions [here](https://doc.rust-lang.org/cargo/getting-started/installation.html).
+This CLI tool is written in `rust` to ensure that it is highly-performant and portable across machine types. As such, it can be installed on any machine that has `cargo` tooling installed.
 
-> On Linux and MacOs machines, simply run the following command in your terminal:
+Ensure you have `cargo` installed on your machine. Installing `cargo` is simple: just follow the instructions [here](https://doc.rust-lang.org/cargo/getting-started/installation.html).
+
+> On Linux and MacOs machines, you can easily install `cargo` by running the following command in your terminal:
 >
 > ```bash
 > curl https://sh.rustup.rs -sSf | sh
@@ -24,14 +26,14 @@ The `fluree-migrate` tool can be used by simply running `fluree-migrate` in your
 
 If just using `fluree-migrate` without any flags or options, the tool will prompt you for the URL of the existing Fluree v2 ledger to migrate from (and, if this is hosted on Fluree's Cloud platform, then it will prompt you for an API Key with which to access that ledger).
 
-Note the following about the default behavior of `fluree-migrate` without any options or flags:
+**Note the following about the default behavior of `fluree-migrate` without any options or flags**:
 
-- The tool will generate a JSON-LD representation of the Fluree v2 schema with RDF/RDFS terms (this is purely metadata for your own reference)
-- The tool will migrate your v2 data to v3 JSON-LD data and will write this to a local directory path that defaults to `output/` (this can be configured via the --output flag)
-- The tool will default to IRI prefixes based on the URL of your existing v2 ledger (e.g. if your v2 ledger is hosted at `http://flur.ee/ledger/example`, then the tool will default to IRI prefixes of `http://flur.ee/ledger/example/ids/` and `http://flur.ee/ledger/example/terms/` for data and vocab entities, respectively -- this can be updated via the --base and --vocab flags)
+- The tool will generate a JSON-LD representation of the Fluree v2 schema with RDF/RDFS terms (_this is purely metadata for your own reference_)
+- The tool will migrate your v2 data to v3 JSON-LD data and will write this to a local directory path that defaults to `output/` (_this can be configured via the `--output` flag; you can also print the output to stdout via the `--print` flag or transact the output to a target v3 instance via the `--target` flag_)
+- The tool will default to IRI prefixes based on the URL of your existing v2 ledger. For example, if your v2 ledger is hosted at `http://flur.ee/ledger/example`, then the tool will default to IRI prefixes of `http://flur.ee/ledger/example/ids/` and `http://flur.ee/ledger/example/terms/` for data and vocab entities, respectively. (_this can be overwritten via the `--base` and `--vocab` flags_)
 
-- The tool **will not** generate a set of SHACL shapes to enforce schema validation for your JSON-LD data (this requires the use of the --shacl flag)
-- The tool **will not** attempt to transact the migrated data to an existing v3 ledger (this requires the use of the --target flag)
+- The tool **will not** generate a set of SHACL shapes to enforce schema validation for your JSON-LD data (_you can do this by leveraging the `--shacl` flag_)
+- The tool **will not** attempt to transact the migrated data to an existing v3 ledger (_you can do this by leveraging the `--target` flag_)
 
 ## Flags & Options
 
@@ -43,11 +45,19 @@ The following flags are available for use with `fluree-migrate`:
 
 This flag will cause the tool to generate a set of SHACL shapes to enforce schema validation for your JSON-LD data. If writing the data to a local directory, the resulting SHACL shapes will be written to the same file as the vocab metadata (e.g. `0_vocab.jsonld`)
 
+```bash
+fluree-migrate --shacl
+```
+
 #### `--closed-shapes`
 
 This flag will cause the tool to generate "closed" SHACL shapes (i.e. no additional properties can be added to instances of the class).
 
 This flag is only useful if the `--shacl` flag is also used.
+
+```bash
+fluree-migrate --shacl --closed-shapes
+```
 
 #### `--print`
 
@@ -55,11 +65,19 @@ This flag will cause the tool to print the output to stdout instead of writing t
 
 This flag conflicts with the `--output` and `--target` flags.
 
+```bash
+fluree-migrate --print
+```
+
 #### `--create-ledger`
 
 This flag will cause the tool to attempt to create the ledger on the target v3 instance. Only use this flag if you have not yet created a v3 ledger to transact your data into.
 
 This flag is only useful if the `--target` flag is also used.
+
+```bash
+fluree-migrate --target http://localhost:58090 --create-ledger
+```
 
 ### Options
 
@@ -69,11 +87,19 @@ This option is used to specify the relative path to the directory where the outp
 
 Writing to a local directory is the default behavior of the tool. The alternatives are to print the output to stdout (`--print`) or to transact the output to a target v3 instance (`--target`).
 
+```bash
+fluree-migrate --output output
+```
+
 #### `--source`
 
 This option is used to specify the URL of the existing Fluree v2 ledger to migrate from. If this is hosted on Fluree's Cloud platform, then you will also need to provide an API Key with which to access that ledger.
 
 If a value is not provided on `--source`, then the tool will prompt you for this URL regardless.
+
+```bash
+fluree-migrate --source https://api.dev.flur.ee/fdb/fluree/387028092977569
+```
 
 #### `--source-auth`
 
@@ -81,9 +107,17 @@ This option is used to specify an API Key with which to access the existing Flur
 
 If a value is not provided on `--source-auth`, then the tool will prompt you for this API Key if it receives a 401 response from the ledger.
 
+```bash
+fluree-migrate --source https://api.dev.flur.ee/fdb/fluree/387028092977569 --source-auth 796b******854d
+```
+
 #### `--target`
 
 This option is used to specify the URL of the target v3 Fluree instance to transact the migrated data to. It is an alternative to using `--output` to write the data to local files or to using `--print` to print the data to stdout.
+
+```bash
+fluree-migrate --target http://localhost:58090
+```
 
 #### `--target-auth`
 
@@ -91,17 +125,29 @@ This option is used to specify an API Key with which to access the target v3 Flu
 
 If a value is not provided on `--target-auth`, then the tool will prompt you for this API Key if it receives a 401 response from the target v3 instance.
 
+```bash
+fluree-migrate --target https://data.flur.ee/fluree --target-auth 796b******854d
+```
+
 #### `--base`
 
 This option is used to specify the `@base` value for the @context of the output JSON-LD. This will be used as a default IRI prefix for all data entities (e.g. `http://example.org/ids/`).
 
 If a value is not provided on `--base`, then the tool will default to using the URL of the existing v2 ledger as the prefix for the `@base` value.
 
+```bash
+fluree-migrate --base http://example.org/ids/
+```
+
 #### `--vocab`
 
 This option is used to specify the `@vocab` value for the @context of the output JSON-LD. This will be used as a default IRI prefix for all vocab entities (e.g. `http://example.org/terms/`).
 
 If a value is not provided on `--vocab`, then the tool will default to using the URL of the existing v2 ledger as the prefix for the `@vocab` value.
+
+```bash
+fluree-migrate --vocab http://example.org/terms/
+```
 
 ## Additional Help
 
