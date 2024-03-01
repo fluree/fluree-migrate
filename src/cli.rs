@@ -15,7 +15,7 @@ pub mod opt {
 
     use crate::fluree::FlureeInstance;
 
-    #[derive(Debug, StructOpt)]
+    #[derive(Debug, StructOpt, Clone)]
     #[structopt(
         name = "fluree-migrate",
         about = "Converts Fluree v2 schema JSON to Fluree v3 JSON-LD"
@@ -24,6 +24,11 @@ pub mod opt {
         /// Accessible URL for v2 Fluree DB. This will be used to fetch the schema and data state
         #[structopt(short, long, conflicts_with = "input")]
         pub source: Option<String>,
+
+        /// Path to the input directory containing v3 Fluree Txn (JSON-LD) data
+        /// For example, data written to local files by this tool
+        #[structopt(short, long, parse(from_os_str), conflicts_with = "source")]
+        pub input: Option<PathBuf>,
 
         /// Authorization token for Nexus ledgers.
         /// e.g. 796b******854d
@@ -714,5 +719,168 @@ pub mod parser {
                 }
             }
         }
+    }
+}
+
+pub mod local_directory {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::Duration,
+    };
+
+    use crossterm::style::Color;
+    use dialoguer::console::{Style, Term};
+    use indicatif::ProgressStyle;
+    use serde_json::Value;
+
+    use crate::{console::pretty_print, fluree::FlureeInstance};
+
+    use super::{opt::Opt, source::Migrate};
+
+    pub struct LocalDirectory {
+        pub path: PathBuf,
+        pub opt: Opt,
+    }
+
+    impl LocalDirectory {
+        pub fn new(opt: &Opt) -> Self {
+            let input = opt.input.clone().unwrap();
+            let input = input.to_str().unwrap();
+            let input = input.to_string();
+            let input = input.replace("\\", "/");
+            let input = Path::new(&input);
+            if !input.exists() {
+                pretty_print(
+                    &format!("Input directory does not exist: {}", input.display()),
+                    Color::DarkRed,
+                    true,
+                );
+                std::process::exit(1);
+            }
+            LocalDirectory {
+                path: input.to_path_buf(),
+                opt: opt.clone(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Migrate for LocalDirectory {
+        async fn migrate(&mut self) {
+            // I need to set an indicatif progress bar
+            // I need to set the length based on the number of files in the directory
+            // need to iterate over the files in the directory
+            // each file is JSON
+            // I need to stringify the JSON and submit to a v3_transact(bod: String) function
+            // I need to handle the response
+            // I need to increase the progress bar
+            let path = Path::new(&self.path);
+            let mut files: Vec<PathBuf> = fs::read_dir(path)
+                .unwrap()
+                .filter_map(|entry| {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        if path.is_file() {
+                            Some(path)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            files.sort();
+
+            let mut target_instance = FlureeInstance::new_target(&self.opt);
+
+            let mut pb = self.opt.pb.clone();
+            pb.reset();
+            pb.set_length(files.len() as u64);
+            pb.enable_steady_tick(Duration::from_millis(400));
+            pb.set_message(format!("{:3}%", 0));
+            pb.set_style(
+                ProgressStyle::with_template(
+                    // note that bar size is fixed unlike cargo which is dynamic
+                    // and also the truncation in cargo uses trailers (`...`)
+                    if Term::stdout().size().1 > 80 {
+                        "{prefix:>12.cyan.bold} [{bar:57}]{msg}  {spinner:.white}"
+                    } else {
+                        "{prefix:>12.cyan.bold} [{bar:57}]{msg}"
+                    },
+                )
+                .unwrap()
+                .tick_strings(&["🌲🎄🌲", "🎄🌲🎄", "🎄🎄🎄"])
+                .progress_chars("=> "),
+            );
+            pb = pb.with_finish(indicatif::ProgressFinish::AndLeave);
+            pb.set_prefix("Writing v3 Data");
+
+            for (index, file) in files.iter().enumerate() {
+                let file_bytes = std::fs::read(&file).expect("Could not read file");
+                let file_string =
+                    String::from_utf8(file_bytes).expect("Could not convert to string");
+                let response_string: Option<Value> = None;
+                let red_bold = Style::new().red().bold();
+
+                while !target_instance.is_available
+                    || !target_instance.is_authorized
+                    || response_string.is_none()
+                {
+                    if !target_instance.is_available {
+                        target_instance.prompt_fix_url();
+                    }
+
+                    if !target_instance.is_authorized {
+                        target_instance.prompt_api_key();
+                    }
+                    if pb.is_finished() {
+                        pb.reset();
+                    }
+                    let response_result = target_instance.v3_transact(file_string.clone()).await;
+                    let validate_attempt = target_instance.validate_result(&response_result);
+
+                    if let Err(e) = validate_attempt {
+                        pb.println(format!("{:>12} {}", red_bold.apply_to("ERROR"), e));
+                    }
+
+                    // let awaited_response = response_result.unwrap().text().await.unwrap();
+                    let awaited_response = match response_result {
+                        Ok(response) => response.text().await.unwrap(),
+                        Err(_) => {
+                            pb.finish_and_clear();
+                            continue;
+                        }
+                    };
+
+                    if target_instance.is_available && target_instance.is_authorized {
+                        // let awaited_response = response_result.unwrap().text().await.unwrap();
+                        // response_string = serde_json::from_str(&awaited_response).unwrap();
+                        // println!("Response: {:?}", response_string);
+                        break;
+                    } else {
+                        let error = serde_json::from_str::<Value>(&awaited_response);
+                        if let Ok(error) = error {
+                            if let Some(error) = error["error"].as_str() {
+                                pb.println(format!("{:>12} {}", red_bold.apply_to("ERROR"), error));
+                            }
+                        }
+                        pb.finish_and_clear();
+                        continue;
+                    }
+                }
+                pb.inc(1);
+                pb.set_message(format!("{:3}%", 100 * (index + 1) / files.len()));
+            }
+        }
+    }
+}
+
+pub mod source {
+    #[async_trait::async_trait]
+    pub trait Migrate {
+        async fn migrate(&mut self);
     }
 }
