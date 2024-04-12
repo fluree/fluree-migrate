@@ -1,6 +1,9 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use crossterm::execute;
 use crossterm::style::{Print, ResetColor, SetForegroundColor};
+use dialoguer::console::Style;
+use indicatif::ProgressBar;
+use log::{log_enabled, Level};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::stdout;
@@ -244,4 +247,57 @@ pub fn parse_for_class_and_property_name(item: &Value) -> (String, String) {
     let orig_class_name = name_parts[0].to_string();
     let orig_property_name = name_parts[1].to_string();
     (orig_class_name, orig_property_name)
+}
+
+pub fn pretty_log(level: Level, pb: &mut ProgressBar, message: &str) {
+    let info_color: Style = Style::new().green().bold();
+    let warn_color: Style = Style::new().yellow().bold();
+    let error_color: Style = Style::new().red().bold();
+    let debug_color: Style = Style::new().cyan().bold();
+
+    if log_enabled!(level) {
+        pb.println(format!(
+            "{:>5}: {}",
+            match level {
+                Level::Info => info_color.apply_to("INFO"),
+                Level::Warn => warn_color.apply_to("WARN"),
+                Level::Error => error_color.apply_to("ERROR"),
+                Level::Debug => debug_color.apply_to("DEBUG"),
+                _ => debug_color.apply_to("DEBUG"),
+            },
+            message
+        ))
+    }
+}
+
+pub fn truncate_tail(string: &str, length: usize) -> String {
+    let start_index = if string.chars().count() > length - 3 {
+        string
+            .char_indices()
+            .nth(string.chars().count() - length)
+            .unwrap()
+            .0
+    } else {
+        0
+    };
+
+    // Slice the string safely to get the last 30 characters.
+    if start_index > 0 {
+        format!("...{}", &string[start_index..])
+    } else {
+        string.to_string()
+    }
+}
+
+pub fn format_bytes(size: usize) -> String {
+    let units = ["bytes", "KB", "MB", "GB", "TB", "PB", "EB"];
+    let size = size as f64;
+    if size < 1_f64 {
+        return format!("{:.1} bytes", size);
+    }
+    let delimiter = 1024_f64;
+    let exponent = (size.ln() / delimiter.ln()).floor() as i32;
+    let pretty_size = size / delimiter.powi(exponent);
+    let unit = units[exponent as usize];
+    format!("{:.1} {}", pretty_size, unit)
 }

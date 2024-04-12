@@ -12,6 +12,7 @@ use fluree::FlureeInstance;
 
 #[tokio::main]
 async fn main() -> Result<(), reqwest::Error> {
+    env_logger::init();
     let opt = Opt::from_args();
 
     if opt.input.is_some() {

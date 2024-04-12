@@ -726,15 +726,20 @@ pub mod local_directory {
     use std::{
         fs,
         path::{Path, PathBuf},
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use crossterm::style::Color;
     use dialoguer::console::{Style, Term};
-    use indicatif::ProgressStyle;
+    use indicatif::{HumanDuration, ProgressStyle};
+    use log::Level;
     use serde_json::Value;
 
-    use crate::{console::pretty_print, fluree::FlureeInstance};
+    use crate::{
+        console::pretty_print,
+        fluree::FlureeInstance,
+        functions::{format_bytes, pretty_log, truncate_tail},
+    };
 
     use super::{opt::Opt, source::Migrate};
 
@@ -768,15 +773,8 @@ pub mod local_directory {
     #[async_trait::async_trait]
     impl Migrate for LocalDirectory {
         async fn migrate(&mut self) {
-            // I need to set an indicatif progress bar
-            // I need to set the length based on the number of files in the directory
-            // need to iterate over the files in the directory
-            // each file is JSON
-            // I need to stringify the JSON and submit to a v3_transact(bod: String) function
-            // I need to handle the response
-            // I need to increase the progress bar
             let path = Path::new(&self.path);
-            let mut files: Vec<PathBuf> = fs::read_dir(path)
+            let files: Vec<PathBuf> = fs::read_dir(path)
                 .unwrap()
                 .filter_map(|entry| {
                     if let Ok(entry) = entry {
@@ -791,8 +789,6 @@ pub mod local_directory {
                     }
                 })
                 .collect();
-
-            files.sort();
 
             let mut target_instance = FlureeInstance::new_target(&self.opt);
 
@@ -818,8 +814,31 @@ pub mod local_directory {
             pb = pb.with_finish(indicatif::ProgressFinish::AndLeave);
             pb.set_prefix("Writing v3 Data");
 
+            pretty_log(Level::Info, &mut pb, "Starting v3 Data Txns");
+            let start_time = Instant::now();
+            let mut last_txn_time = Instant::now();
+            let mut cumulative_file_size = 0;
+
             for (index, file) in files.iter().enumerate() {
                 let file_bytes = std::fs::read(&file).expect("Could not read file");
+                let file_size = file_bytes.len();
+                cumulative_file_size += file_size;
+                pretty_log(
+                    Level::Info,
+                    &mut pb,
+                    &format!(
+                        "Transacting: {:40} | Size: {} | Total Size: {} | {}/{} | Last Txn: {} | Total Time: {}",
+                        truncate_tail(&format!("{}", file.display()), 40),
+                        format_bytes(file_size),
+                        format_bytes(cumulative_file_size),
+                        index + 1,
+                        files.len(),
+                        HumanDuration(last_txn_time.elapsed()),
+                        HumanDuration(start_time.elapsed()),
+                    ),
+                );
+                last_txn_time = Instant::now();
+
                 let file_string =
                     String::from_utf8(file_bytes).expect("Could not convert to string");
                 let response_string: Option<Value> = None;
