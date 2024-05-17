@@ -726,6 +726,7 @@ pub mod local_directory {
     use std::{
         fs,
         path::{Path, PathBuf},
+        thread,
         time::{Duration, Instant},
     };
 
@@ -790,7 +791,65 @@ pub mod local_directory {
                 })
                 .collect();
 
+            // files.sort();
+
             let mut target_instance = FlureeInstance::new_target(&self.opt);
+
+            let response = match &self.opt.is_create_ledger {
+                true => None,
+                false => {
+                    let txn_id_query = serde_json::json!({
+                        "@context": {
+                            "f": "https://ns.flur.ee/ledger#"
+                        },
+                        "from": "redshift/test",
+                        "selectDistinct": "?o",
+                        "where": {
+                            "@type": "f:Txn",
+                            "f:fileName": "?o"
+                        }
+                    });
+
+                    let query = serde_json::to_string(&txn_id_query).unwrap();
+
+                    let response = target_instance.v3_query(query).await;
+
+                    let response = match response {
+                        Ok(response) => response,
+                        Err(_) => {
+                            pretty_print(
+                                "Could not fetch existing txn IDs from target instance",
+                                Color::DarkRed,
+                                true,
+                            );
+                            std::process::exit(1);
+                        }
+                    };
+
+                    match response.error_for_status() {
+                        Ok(response) => Some(response),
+                        Err(e) => {
+                            pretty_print(&format!("Error: {}", e), Color::DarkRed, true);
+                            None
+                        }
+                    }
+                }
+            };
+
+            let txn_id_hash_set = match response {
+                Some(response) => {
+                    let response_string = response.text().await.unwrap();
+                    let response_value = serde_json::from_str::<Value>(&response_string).unwrap();
+
+                    response_value
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|value| value.as_str().unwrap().to_string())
+                        .collect()
+                }
+                None => std::collections::HashSet::new(),
+            };
 
             let mut pb = self.opt.pb.clone();
             pb.reset();
@@ -818,8 +877,35 @@ pub mod local_directory {
             let start_time = Instant::now();
             let mut last_txn_time = Instant::now();
             let mut cumulative_file_size = 0;
+            let mut retry_count = 0;
 
             for (index, file) in files.iter().enumerate() {
+                // TODO: remove
+                // if index > 0 {
+                //     std::thread::sleep(Duration::from_millis(3000));
+                //     pretty_log(Level::Info, &mut pb, "Waiting for 3 seconds...");
+                // }
+
+                if txn_id_hash_set
+                    .contains(&file.file_name().unwrap().to_str().unwrap().to_string())
+                {
+                    pretty_log(
+                        Level::Info,
+                        &mut pb,
+                        &format!(
+                            "Skipping: {:40} | {}/{} | Last Txn: {} | Total Time: {}",
+                            truncate_tail(&format!("{}", file.display()), 40),
+                            index + 1,
+                            files.len(),
+                            HumanDuration(last_txn_time.elapsed()),
+                            HumanDuration(start_time.elapsed()),
+                        ),
+                    );
+                    pb.inc(1);
+                    pb.set_message(format!("{:3}%", 100 * (index + 1) / files.len()));
+                    continue;
+                }
+
                 let file_bytes = std::fs::read(&file).expect("Could not read file");
                 let file_size = file_bytes.len();
                 cumulative_file_size += file_size;
@@ -839,8 +925,26 @@ pub mod local_directory {
                 );
                 last_txn_time = Instant::now();
 
+                // TODO: Remove all of this
+                // let mut file_json_value =
+                //     serde_json::from_slice::<Value>(&file_bytes).expect("Could not parse JSON");
+
+                // // file_json_value has a key, "insert". It's value is an array of objects. I want to insert a new object into that array.
+
+                // let file_json = file_json_value.as_object_mut().unwrap();
+                // let file_name_str = file.file_name().unwrap().to_str().unwrap();
+
+                // let file_json_insert = file_json.get_mut("insert").unwrap().as_array_mut().unwrap();
+
+                // file_json_insert.push(serde_json::json!({
+                //     "@type": "f:Txn",
+                //     "f:fileName": file_name_str,
+                // }));
+                // // TODO: Remove to here
+
+                // let file_string = serde_json::to_string(&file_json).unwrap();
                 let file_string =
-                    String::from_utf8(file_bytes).expect("Could not convert to string");
+                    String::from_utf8(file_bytes).expect("Could not parse JSON bytes");
                 let response_string: Option<Value> = None;
                 let red_bold = Style::new().red().bold();
 
@@ -849,7 +953,23 @@ pub mod local_directory {
                     || response_string.is_none()
                 {
                     if !target_instance.is_available {
-                        target_instance.prompt_fix_url();
+                        if retry_count < 5 {
+                            pretty_log(
+                                Level::Warn,
+                                &mut pb,
+                                &format!(
+                                    "Timeout: {:40} | Moving on to next file in 15 seconds...",
+                                    truncate_tail(&format!("{}", file.display()), 40),
+                                ),
+                            );
+                            target_instance.is_available = true;
+                            target_instance.is_authorized = true;
+                            thread::sleep(Duration::from_secs(15));
+                            retry_count += 1;
+                            break;
+                        } else {
+                            target_instance.prompt_fix_url();
+                        }
                     }
 
                     if !target_instance.is_authorized {
@@ -878,6 +998,7 @@ pub mod local_directory {
                         // let awaited_response = response_result.unwrap().text().await.unwrap();
                         // response_string = serde_json::from_str(&awaited_response).unwrap();
                         // println!("Response: {:?}", response_string);
+                        retry_count = 0;
                         break;
                     } else {
                         let error = serde_json::from_str::<Value>(&awaited_response);

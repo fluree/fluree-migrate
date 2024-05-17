@@ -159,6 +159,24 @@ impl FlureeInstance {
             .await
     }
 
+    pub async fn v3_query(&mut self, body: String) -> Result<Response, Error> {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert("Content-Type", "application/json".parse().unwrap());
+        if let Some(auth) = self.api_key.clone() {
+            request_headers.insert(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_str(&format!("{}", &auth)).unwrap(),
+            );
+        }
+
+        self.client
+            .post(&format!("{}/fluree/query", self.url))
+            .headers(request_headers)
+            .body(body)
+            .send()
+            .await
+    }
+
     pub async fn issue_initial_query(&self) -> Result<Response, Error> {
         let mut request_headers = HeaderMap::new();
         request_headers.insert("Content-Type", "application/json".parse().unwrap());
