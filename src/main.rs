@@ -1,6 +1,6 @@
+use clap::Parser;
 use cli::local_directory::LocalDirectory;
 use cli::source::Migrate;
-use structopt::StructOpt;
 
 mod cli;
 mod console;
@@ -13,7 +13,7 @@ use fluree::FlureeInstance;
 #[tokio::main]
 async fn main() -> Result<(), reqwest::Error> {
     env_logger::init();
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
     if opt.input.is_some() {
         let mut source_directory = LocalDirectory::new(&opt);

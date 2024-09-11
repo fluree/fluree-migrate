@@ -159,6 +159,24 @@ impl FlureeInstance {
             .await
     }
 
+    pub async fn v3_query(&mut self, body: String) -> Result<Response, Error> {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert("Content-Type", "application/json".parse().unwrap());
+        if let Some(auth) = self.api_key.clone() {
+            request_headers.insert(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_str(&format!("{}", &auth)).unwrap(),
+            );
+        }
+
+        self.client
+            .post(&format!("{}/fluree/query", self.url))
+            .headers(request_headers)
+            .body(body)
+            .send()
+            .await
+    }
+
     pub async fn issue_initial_query(&self) -> Result<Response, Error> {
         let mut request_headers = HeaderMap::new();
         request_headers.insert("Content-Type", "application/json".parse().unwrap());
@@ -199,6 +217,7 @@ impl FlureeInstance {
             Ok(response) => match response.status() {
                 reqwest::StatusCode::OK | reqwest::StatusCode::CREATED => (true, true),
                 reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+                    println!("Response: {:?}", response.error_for_status_ref());
                     match self.api_key {
                         Some(_) => {
                             final_result = Err(format!("The API Key you provided is not authorized to access this database. Please try again."));
@@ -375,8 +394,8 @@ impl Migrate for FlureeInstance {
         }
 
         let vocab_results_map = parser.get_vocab_json(&opt);
-        if !opt.print {
-            std::fs::remove_dir_all(opt.output.clone()).unwrap_or_else(|why| {
+        if !opt.print && opt.output.is_some() {
+            std::fs::remove_dir_all(opt.output.clone().unwrap()).unwrap_or_else(|why| {
                 if why.kind() != std::io::ErrorKind::NotFound {
                     panic!("Unable to remove existing output directory: {}", why);
                 }
@@ -394,13 +413,13 @@ impl Migrate for FlureeInstance {
         let query_classes: Vec<String> = parser.classes.keys().map(|key| key.to_owned()).collect();
 
         let mut data_results_map = serde_json::Map::new();
-        data_results_map.insert(
-            "ledger".to_string(),
-            json!(format!(
-                "{}/{}",
-                source_instance.network_name, source_instance.db_name
-            )),
-        );
+
+        let ledger_name = match &opt.ledger_name {
+            Some(ledger_name) => ledger_name.to_string(),
+            None => format!("{}/{}", self.network_name, self.db_name),
+        };
+
+        data_results_map.insert("ledger".to_string(), json!(ledger_name));
 
         data_results_map.insert(
             "@context".to_string(),
@@ -748,7 +767,10 @@ impl Migrate for FlureeInstance {
 
         let finish_line = match (output, target) {
             (_, Some(target)) => format!("to Target Ledger [{}] ", target),
-            (output, _) => format!("to {}/ ", output.to_str().unwrap()),
+            (output, _) => match output {
+                Some(output) => format!("to {}/ ", output.to_str().unwrap()),
+                None => "".to_string(),
+            },
         };
         println!(
             "{:>12} v3 Migration {}in {}",
