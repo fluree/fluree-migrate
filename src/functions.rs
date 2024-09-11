@@ -146,42 +146,79 @@ pub fn create_context(
                 context.insert("@vocab".to_string(), vocab.clone());
             }
         }
-        (Some(base), None) => {
-            if is_vocab {
-                context.insert(
-                    "@base".to_string(),
-                    format!("{}/terms/", source_instance.url),
-                );
-            } else {
-                context.insert("@base".to_string(), base.clone());
-                context.insert(
-                    "@vocab".to_string(),
-                    format!("{}/terms/", source_instance.url),
-                );
+        (Some(base), None) => match &opt.no_vocab {
+            false => {
+                if is_vocab {
+                    context.insert(
+                        "@base".to_string(),
+                        format!("{}/terms/", source_instance.url),
+                    );
+                } else {
+                    context.insert("@base".to_string(), base.clone());
+                    context.insert(
+                        "@vocab".to_string(),
+                        format!("{}/terms/", source_instance.url),
+                    );
+                }
             }
-        }
-        (None, Some(vocab)) => {
-            if is_vocab {
-                context.insert("@base".to_string(), vocab.clone());
-            } else {
-                context.insert("@base".to_string(), format!("{}/ids/", source_instance.url));
-                context.insert("@vocab".to_string(), vocab.clone());
+            true => {
+                if !is_vocab {
+                    context.insert("@base".to_string(), base.clone());
+                }
             }
-        }
-        (None, None) => {
-            if is_vocab {
-                context.insert(
-                    "@base".to_string(),
-                    format!("{}/terms/", source_instance.url),
-                );
-            } else {
-                context.insert("@base".to_string(), format!("{}/ids/", source_instance.url));
-                context.insert(
-                    "@vocab".to_string(),
-                    format!("{}/terms/", source_instance.url),
-                );
+        },
+        (None, Some(vocab)) => match &opt.no_base {
+            false => {
+                if is_vocab {
+                    context.insert("@base".to_string(), vocab.clone());
+                } else {
+                    context.insert("@base".to_string(), format!("{}/ids/", source_instance.url));
+                    context.insert("@vocab".to_string(), vocab.clone());
+                }
             }
-        }
+            true => {
+                if is_vocab {
+                    context.insert("@base".to_string(), vocab.clone());
+                } else {
+                    context.insert("@vocab".to_string(), vocab.clone());
+                }
+            }
+        },
+        (None, None) => match (&opt.no_base, &opt.no_vocab) {
+            (false, false) => {
+                if is_vocab {
+                    context.insert(
+                        "@base".to_string(),
+                        format!("{}/terms/", source_instance.url),
+                    );
+                } else {
+                    context.insert("@base".to_string(), format!("{}/ids/", source_instance.url));
+                    context.insert(
+                        "@vocab".to_string(),
+                        format!("{}/terms/", source_instance.url),
+                    );
+                }
+            }
+            (true, false) => {
+                if is_vocab {
+                    context.insert(
+                        "@base".to_string(),
+                        format!("{}/terms/", source_instance.url),
+                    );
+                } else {
+                    context.insert(
+                        "@vocab".to_string(),
+                        format!("{}/terms/", source_instance.url),
+                    );
+                }
+            }
+            (false, true) => {
+                if !is_vocab {
+                    context.insert("@base".to_string(), format!("{}/ids/", source_instance.url));
+                }
+            }
+            (true, true) => {}
+        },
     }
 
     if opt.shacl {

@@ -1,6 +1,6 @@
 [package]
 name = "fluree-migrate"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 async-trait = "0.1.77"
 chrono = "0.4.30"
+clap = { version = "4.5.7", features = ["derive"] }
 crossterm = "0.27.0"
 deepsize = "0.2.0"
 dialoguer = { version = "0.10.4", features = ["completion"] }
@@ -17,6 +18,8 @@ log = "0.4.21"
 reqwest = { version = "0.11.16", features = ["rustls-tls"], default-features = false }
 serde = { version = "1.0.188", features = ["derive"] }
 serde_json = "1.0.105"
-structopt = "0.3.26"
 tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+lto = "fat"
 

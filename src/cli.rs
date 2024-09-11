@@ -1,4 +1,5 @@
 pub mod opt {
+    use clap::Parser;
     use crossterm::{
         execute,
         style::{Print, ResetColor},
@@ -11,40 +12,50 @@ pub mod opt {
         io::{self, stdout, Write},
         path::PathBuf,
     };
-    use structopt::StructOpt;
 
     use crate::fluree::FlureeInstance;
 
-    #[derive(Debug, StructOpt, Clone)]
-    #[structopt(
-        name = "fluree-migrate",
-        about = "Converts Fluree v2 schema JSON to Fluree v3 JSON-LD"
+    // #[structopt(
+    //     name = "fluree-migrate",
+    //     about = "Converts Fluree v2 schema JSON to Fluree v3 JSON-LD"
+    // )]
+    #[derive(Parser, Debug, Clone)]
+    #[command(
+        version,
+        about,
+        long_about = "Converts Fluree v2 schema JSON to Fluree v3 JSON-LD"
     )]
     pub struct Opt {
         /// Accessible URL for v2 Fluree DB. This will be used to fetch the schema and data state
-        #[structopt(short, long, conflicts_with = "input")]
+        #[arg(short, long, conflicts_with = "input")]
         pub source: Option<String>,
 
         /// Path to the input directory containing v3 Fluree Txn (JSON-LD) data
         /// For example, data written to local files by this tool
-        #[structopt(short, long, parse(from_os_str), conflicts_with = "source")]
+        #[arg(short, long, value_hint = clap::ValueHint::DirPath, conflicts_with = "source")]
         pub input: Option<PathBuf>,
 
         /// Authorization token for Nexus ledgers.
         /// e.g. 796b******854d
-        #[structopt(long, conflicts_with = "input", requires = "source")]
+        #[arg(long, conflicts_with = "input", requires = "source")]
         pub source_auth: Option<String>,
 
         /// If writing the output to local files,
         /// then this is the relative path to the directory where the files will be written.
         /// [Conflicts with --target & --print]
-        #[structopt(short, long, parse(from_os_str), default_value = "output")]
-        pub output: PathBuf,
+        #[arg(
+            short,
+            long,
+            value_hint = clap::ValueHint::DirPath,
+            conflicts_with = "target",
+            conflicts_with = "print"
+        )]
+        pub output: Option<PathBuf>,
 
         /// If transacting the output to a target v3 Fluree instance, this is the URL for that instance.
         /// e.g. http://localhost:58090
         /// [Conflicts with --output & --print]
-        #[structopt(
+        #[arg(
             short,
             long = "target",
             conflicts_with = "output",
@@ -54,41 +65,57 @@ pub mod opt {
 
         /// Authorization token for the target v3 instance (if hosted on Nexus).
         /// Only useful if transacting the output to a target v3 Fluree instance.
-        #[structopt(long, requires = "target")]
+        #[arg(long, requires = "target")]
         pub target_auth: Option<String>,
 
         /// If set, then the output will be printed to stdout instead of written to local files or to a target v3 instance.
         /// [Conflicts with --output & --target]
-        #[structopt(long, conflicts_with = "output", conflicts_with = "target")]
+        #[arg(long, conflicts_with = "output", conflicts_with = "target")]
         pub print: bool,
 
         /// @base value for @context.
         /// This will be used as a default IRI prefix for all data entities.
         /// e.g. http://example.org/ids/
-        #[structopt(short, long)]
+        #[arg(short, long, conflicts_with = "no_base")]
         pub base: Option<String>,
 
         /// @vocab value for @context.
         /// This will be used as a default IRI prefix for all vocab entities.
         /// e.g. http://example.org/terms/
-        #[structopt(short, long)]
+        #[arg(short, long, conflicts_with = "no_vocab")]
         pub vocab: Option<String>,
 
         /// If set, then the result vocab JSON-LD will include SHACL shapes for each class.
-        #[structopt(long)]
+        #[arg(long)]
         pub shacl: bool,
 
         /// This depends on the --shacl flag being used.
         /// If set, then the resulting SHACL shapes will be "closed" (i.e. no additional properties can be added to instances of the class).
-        #[structopt(long = "closed-shapes", requires = "shacl")]
+        #[arg(long = "closed-shapes", requires = "shacl")]
         pub closed_shapes: bool,
 
         /// This depends on the --target flag being used.
         /// If set, then the first transaction issued against the target will attempt to create the ledger
-        #[structopt(long = "create-ledger", requires = "target")]
+        #[arg(long = "create-ledger", requires = "target")]
         pub is_create_ledger: bool,
 
-        #[structopt(skip = ProgressBar::new(2))]
+        /// If set, then the @context will not include a @base value.
+        /// Expanded IRIs for data entities may not be valid fully-qualified IRIs, so use this at your own risk.
+        #[arg(long = "no-base", conflicts_with = "base")]
+        pub no_base: bool,
+
+        /// If set, then the @context will not include a @vocab value.
+        /// Expanded IRIs for vocab entities may not be valid fully-qualified IRIs, so use this at your own risk.
+        #[arg(long = "no-vocab", conflicts_with = "vocab")]
+        pub no_vocab: bool,
+
+        /// If set, then the resulting transactions will target the specified ledger name.
+        /// This is useful if the target instance is an existing, already-named ledger.
+        /// e.g. "example/dataset-one"
+        #[arg(long = "ledger-name")]
+        pub ledger_name: Option<String>,
+
+        #[arg(skip = ProgressBar::new(2))]
         pub pb: ProgressBar,
     }
 
@@ -209,7 +236,7 @@ pub mod opt {
 
                 Some(target_instance)
             } else {
-                let base_path = self.output.clone();
+                let base_path = self.output.clone().unwrap();
                 std::fs::create_dir_all(&base_path).unwrap_or_else(|why| {
                     if why.kind() != std::io::ErrorKind::AlreadyExists {
                         panic!("Unable to create output directory: {}", why);
@@ -374,10 +401,12 @@ pub mod parser {
 
             let mut vocab_results_map = serde_json::Map::new();
 
-            vocab_results_map.insert(
-                "ledger".to_string(),
-                serde_json::json!(format!("{}/{}", self.network_name, self.db_name)),
-            );
+            let ledger_name = match &opt.ledger_name {
+                Some(ledger_name) => ledger_name.to_string(),
+                None => format!("{}/{}", self.network_name, self.db_name),
+            };
+
+            vocab_results_map.insert("ledger".to_string(), serde_json::json!(ledger_name));
 
             vocab_results_map.insert(
                 "@context".to_string(),
@@ -791,9 +820,42 @@ pub mod local_directory {
                 })
                 .collect();
 
-            // files.sort();
-
             let mut target_instance = FlureeInstance::new_target(&self.opt);
+
+            // find the file with the smallest size
+            let smallest_file = files
+                .iter()
+                .min_by(|a, b| {
+                    a.metadata()
+                        .unwrap()
+                        .len()
+                        .cmp(&b.metadata().unwrap().len())
+                })
+                .unwrap();
+
+            // read the file, parse it to serde_json
+            let file_parsed_json =
+                serde_json::from_slice::<Value>(&fs::read(&smallest_file).unwrap())
+                    .expect("Could not parse JSON");
+
+            // file_parsed_json must be an object (otherwise panic). It must have a "ledger" key. We need the string value of the ledger key:
+            let ledger_name_from_file = file_parsed_json["ledger"].as_str();
+
+            let ledger_name = if self.opt.ledger_name.is_some() {
+                self.opt.ledger_name.clone().unwrap()
+            } else {
+                match ledger_name_from_file {
+                    Some(ledger_name) => ledger_name.to_string(),
+                    None => {
+                        pretty_print(
+                            "Could not find ledger name in source files. Please provide a ledger name with \"--ledger-name\"",
+                            Color::DarkRed,
+                            true,
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            };
 
             let response = match &self.opt.is_create_ledger {
                 true => None,
@@ -802,12 +864,13 @@ pub mod local_directory {
                         "@context": {
                             "f": "https://ns.flur.ee/ledger#"
                         },
-                        "from": "redshift/test",
+                        "from": ledger_name,
                         "selectDistinct": "?o",
                         "where": {
                             "@type": "f:Txn",
                             "f:fileName": "?o"
-                        }
+                        },
+                        "limit": 999999
                     });
 
                     let query = serde_json::to_string(&txn_id_query).unwrap();
@@ -880,12 +943,6 @@ pub mod local_directory {
             let mut retry_count = 0;
 
             for (index, file) in files.iter().enumerate() {
-                // TODO: remove
-                // if index > 0 {
-                //     std::thread::sleep(Duration::from_millis(3000));
-                //     pretty_log(Level::Info, &mut pb, "Waiting for 3 seconds...");
-                // }
-
                 if txn_id_hash_set
                     .contains(&file.file_name().unwrap().to_str().unwrap().to_string())
                 {
@@ -908,6 +965,32 @@ pub mod local_directory {
 
                 let file_bytes = std::fs::read(&file).expect("Could not read file");
                 let file_size = file_bytes.len();
+
+                if file_size < 1000 {
+                    let json_parsed_value =
+                        serde_json::from_slice::<Value>(&file_bytes).expect("Could not parse JSON");
+                    // if json_parsed_value.insert is array and has no elements, then skip
+                    if json_parsed_value["insert"].is_array()
+                        && json_parsed_value["insert"].as_array().unwrap().len() < 2
+                    {
+                        pretty_log(
+                            Level::Info,
+                            &mut pb,
+                            &format!(
+                                "EMPTY!! {:40} | {}/{} | Last Txn: {} | Total Time: {}",
+                                truncate_tail(&format!("{}", file.display()), 40),
+                                index + 1,
+                                files.len(),
+                                HumanDuration(last_txn_time.elapsed()),
+                                HumanDuration(start_time.elapsed()),
+                            ),
+                        );
+                        pb.inc(1);
+                        pb.set_message(format!("{:3}%", 100 * (index + 1) / files.len()));
+                        continue;
+                    }
+                }
+
                 cumulative_file_size += file_size;
                 pretty_log(
                     Level::Info,
@@ -925,24 +1008,6 @@ pub mod local_directory {
                 );
                 last_txn_time = Instant::now();
 
-                // TODO: Remove all of this
-                // let mut file_json_value =
-                //     serde_json::from_slice::<Value>(&file_bytes).expect("Could not parse JSON");
-
-                // // file_json_value has a key, "insert". It's value is an array of objects. I want to insert a new object into that array.
-
-                // let file_json = file_json_value.as_object_mut().unwrap();
-                // let file_name_str = file.file_name().unwrap().to_str().unwrap();
-
-                // let file_json_insert = file_json.get_mut("insert").unwrap().as_array_mut().unwrap();
-
-                // file_json_insert.push(serde_json::json!({
-                //     "@type": "f:Txn",
-                //     "f:fileName": file_name_str,
-                // }));
-                // // TODO: Remove to here
-
-                // let file_string = serde_json::to_string(&file_json).unwrap();
                 let file_string =
                     String::from_utf8(file_bytes).expect("Could not parse JSON bytes");
                 let response_string: Option<Value> = None;
