@@ -124,7 +124,8 @@ pub fn parse_current_predicates(json: Value) -> Value {
         .iter()
         .filter(|value| {
             let id = value["_id"].as_i64().unwrap();
-            !initial_predicates.contains(&id)
+            let pred_name = value["name"].as_str().unwrap();
+            pred_name == "_user/username" || !initial_predicates.contains(&id)
         })
         .collect::<Vec<&Value>>();
     serde_json::json!(current_predicates)

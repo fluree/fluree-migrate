@@ -81,6 +81,7 @@ impl FlureeInstance {
         let url = opt.check_url(false);
         let (network_name, db_name) = Self::get_db_name(&url);
         let is_created = !opt.is_create_ledger;
+        let user_agent = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
         FlureeInstance {
             url: url.to_string(),
             network_name,
@@ -88,7 +89,10 @@ impl FlureeInstance {
             is_available: true,
             is_authorized: true,
             api_key: opt.target_auth.clone(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .user_agent(user_agent)
+                .build()
+                .unwrap(),
             is_created,
             opt: opt.clone(),
         }
@@ -140,6 +144,10 @@ impl FlureeInstance {
             request_headers.insert(
                 reqwest::header::AUTHORIZATION,
                 reqwest::header::HeaderValue::from_str(&format!("{}", &auth)).unwrap(),
+            );
+            request_headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                reqwest::header::HeaderValue::from_str("application/json").unwrap(),
             );
         }
 
