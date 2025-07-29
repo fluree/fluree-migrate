@@ -134,7 +134,7 @@ pub mod opt {
                     .show_default(true)
                     .validate_with({
                         move |input: &String| -> Result<(), &str> {
-                            if let Ok(_) = reqwest::Url::parse(input) {
+                            if reqwest::Url::parse(input).is_ok() {
                                 Ok(())
                             } else {
                                 Err("Please provide a valid URL")
@@ -161,7 +161,7 @@ pub mod opt {
                 None
             } else if self.target.is_some() {
                 let mut target_instance = match target_instance {
-                    None => FlureeInstance::new_target(&self),
+                    None => FlureeInstance::new_target(self),
                     Some(fi) => fi,
                 };
 
@@ -239,12 +239,12 @@ pub mod opt {
                 let base_path = self.output.clone().unwrap();
                 std::fs::create_dir_all(&base_path).unwrap_or_else(|why| {
                     if why.kind() != std::io::ErrorKind::AlreadyExists {
-                        panic!("Unable to create output directory: {}", why);
+                        panic!("Unable to create output directory: {why}");
                     }
                 });
 
                 let mut file =
-                    File::create(&base_path.join(file_name)).expect("Unable to create file");
+                    File::create(base_path.join(file_name)).expect("Unable to create file");
                 let mut data_writer = io::BufWriter::new(&mut file);
                 data_writer
                     .write_all(data.as_bytes())
@@ -304,6 +304,7 @@ pub mod temp_files {
                 OpenOptions::new()
                     .write(true)
                     .create(true)
+                    .truncate(true)
                     .open(file_path)?,
             );
             Ok(())
@@ -426,20 +427,18 @@ pub mod parser {
         pub fn get_or_create_class(&self, orig_class_name: &str) -> Class {
             let class_name = &standardize_class_name(orig_class_name);
             let class_object = self.classes.get(orig_class_name);
-            let class_object = match class_object {
+            match class_object {
                 Some(class_object) => class_object.to_owned(),
                 None => Class::new(class_name),
-            };
-            class_object
+            }
         }
 
         pub fn get_or_create_property(&self, property_name: &str, type_value: &str) -> Property {
             let property_object = self.properties.get(property_name);
-            let property_object = match property_object {
+            match property_object {
                 Some(property_object) => property_object.update_types_and_own(type_value),
                 None => Property::new(property_name, type_value),
-            };
-            property_object
+            }
         }
 
         pub fn get_or_create_shacl_shape(
@@ -448,11 +447,10 @@ pub mod parser {
             closed_shapes: bool,
         ) -> ShaclShape {
             let shacl_shape = self.shacl_shapes.get(class_name);
-            let shacl_shape = match shacl_shape {
+            match shacl_shape {
                 Some(shacl_shape) => shacl_shape.to_owned(),
                 None => ShaclShape::new(class_name, closed_shapes),
-            };
-            shacl_shape
+            }
         }
 
         // TODO: if another shacl_shape in parser.shacl_shapes has the same property name, and if it has a different datatype, then I need to log a warning and I need to update the property name to be the Class/Property (e.g. Person/age and Animal/age)
@@ -545,7 +543,7 @@ pub mod parser {
                             "int" => "xsd:integer".to_string(),
                             "instant" => "xsd:dateTime".to_string(),
                             // "ref" => "xsd:anyURI".to_string(),
-                            _ => format!("xsd:{}", type_value),
+                            _ => format!("xsd:{type_value}"),
                         };
                         Some(data_type)
                     }
@@ -560,11 +558,8 @@ pub mod parser {
             pub fn update_types_and_own(&self, type_value: &str) -> Self {
                 let mut property = self.to_owned();
                 let data_type = Self::normalize_type_value(type_value);
-                match data_type {
-                    Some(data_type) => {
-                        property.data_types.insert(data_type);
-                    }
-                    None => {}
+                if let Some(data_type) = data_type {
+                    property.data_types.insert(data_type);
                 }
                 property
             }
@@ -670,16 +665,11 @@ pub mod parser {
                                     format!("Proceeding with SHACL NodeShape but skipping \"sh:datatype\" for \"{p}\"."),
                                 ];
                                 result = Err(error_vec);
-                            } else {
-                                match property_types.iter().next() {
-                                    Some(data_type) => {
-                                        shacl_property.datatype = Some(HashMap::from([(
-                                            "@id".to_string(),
-                                            data_type.to_string(),
-                                        )]));
-                                    }
-                                    None => {}
-                                }
+                            } else if let Some(data_type) = property_types.iter().next() {
+                                shacl_property.datatype = Some(HashMap::from([(
+                                    "@id".to_string(),
+                                    data_type.to_string(),
+                                )]));
                             }
                         }
                         "restrictCollection" => {
@@ -835,7 +825,7 @@ pub mod local_directory {
 
             // read the file, parse it to serde_json
             let file_parsed_json =
-                serde_json::from_slice::<Value>(&fs::read(&smallest_file).unwrap())
+                serde_json::from_slice::<Value>(&fs::read(smallest_file).unwrap())
                     .expect("Could not parse JSON");
 
             // file_parsed_json must be an object (otherwise panic). It must have a "ledger" key. We need the string value of the ledger key:
@@ -892,7 +882,7 @@ pub mod local_directory {
                     match response.error_for_status() {
                         Ok(response) => Some(response),
                         Err(e) => {
-                            pretty_print(&format!("Error: {}", e), Color::DarkRed, true);
+                            pretty_print(&format!("Error: {e}"), Color::DarkRed, true);
                             None
                         }
                     }
@@ -943,9 +933,7 @@ pub mod local_directory {
             let mut retry_count = 0;
 
             for (index, file) in files.iter().enumerate() {
-                if txn_id_hash_set
-                    .contains(&file.file_name().unwrap().to_str().unwrap().to_string())
-                {
+                if txn_id_hash_set.contains(file.file_name().unwrap().to_str().unwrap()) {
                     pretty_log(
                         Level::Info,
                         &mut pb,
@@ -963,7 +951,7 @@ pub mod local_directory {
                     continue;
                 }
 
-                let file_bytes = std::fs::read(&file).expect("Could not read file");
+                let file_bytes = std::fs::read(file).expect("Could not read file");
                 let file_size = file_bytes.len();
 
                 if file_size < 1000 {

@@ -71,10 +71,7 @@ pub fn case_normalize(string: &str) -> String {
     let mut split = string.split("_");
     let mut result = String::new();
     let first = split.next();
-    let first = match first {
-        Some(first) => first,
-        None => "",
-    };
+    let first = first.unwrap_or_default();
     result.push_str(first);
     for part in split {
         result.push_str(&capitalize(part));
@@ -93,8 +90,7 @@ pub fn capitalize(string: &str) -> String {
 pub fn standardize_class_name(string: &str) -> String {
     let string = remove_namespace(string);
     let string = capitalize(&string);
-    let string = case_normalize(&string);
-    string
+    case_normalize(&string)
 }
 
 pub fn standardize_property_name(string: &str) -> String {
@@ -257,29 +253,17 @@ pub fn parse_for_class_and_property_name(item: &Value) -> (String, String) {
     let item_id = item["_id"]
         .as_i64()
         .expect("An item in the JSON array does not have an _id");
-    let item_name = item["name"].as_str().expect(
-        format!(
-            "An item in the JSON array does not have a name: {:?}",
-            item_id
-        )
-        .as_str(),
-    );
+    let item_name = item["name"]
+        .as_str()
+        .unwrap_or_else(|| panic!("An item in the JSON array does not have a name: {item_id:?}"));
     let mut name_split = item_name.split("/");
     let name_parts: [&str; 2] = [
-        name_split.next().expect(
-            format!(
-                "{} does not have a collection and property name (e.g. collection/property)",
-                item_name
+        name_split.next().unwrap_or_else(|| {
+            panic!(
+                "{item_name} does not have a collection and property name (e.g. collection/property)"
             )
-            .as_str(),
-        ),
-        name_split.next().expect(
-            format!(
-                "{} does not have a collection and property name (e.g. collection/property)",
-                item_name
-            )
-            .as_str(),
-        ),
+        }),
+        name_split.next().unwrap_or_else(|| panic!("{item_name} does not have a collection and property name (e.g. collection/property)")),
     ];
 
     let orig_class_name = name_parts[0].to_string();
@@ -331,11 +315,11 @@ pub fn format_bytes(size: usize) -> String {
     let units = ["bytes", "KB", "MB", "GB", "TB", "PB", "EB"];
     let size = size as f64;
     if size < 1_f64 {
-        return format!("{:.1} bytes", size);
+        return format!("{size:.1} bytes");
     }
     let delimiter = 1024_f64;
     let exponent = (size.ln() / delimiter.ln()).floor() as i32;
     let pretty_size = size / delimiter.powi(exponent);
     let unit = units[exponent as usize];
-    format!("{:.1} {}", pretty_size, unit)
+    format!("{pretty_size:.1} {unit}")
 }

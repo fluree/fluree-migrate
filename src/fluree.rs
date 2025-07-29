@@ -117,7 +117,7 @@ impl FlureeInstance {
             .show_default(true)
             .validate_with({
                 move |input: &String| -> Result<(), &str> {
-                    if let Ok(_) = reqwest::Url::parse(input) {
+                    if reqwest::Url::parse(input).is_ok() {
                         Ok(())
                     } else {
                         Err("Please provide a valid URL")
@@ -143,7 +143,7 @@ impl FlureeInstance {
         if let Some(auth) = self.api_key.clone() {
             request_headers.insert(
                 reqwest::header::AUTHORIZATION,
-                reqwest::header::HeaderValue::from_str(&format!("{}", &auth)).unwrap(),
+                reqwest::header::HeaderValue::from_str(&auth).unwrap(),
             );
             request_headers.insert(
                 reqwest::header::CONTENT_TYPE,
@@ -160,7 +160,7 @@ impl FlureeInstance {
         self.is_created = true;
 
         self.client
-            .post(&format!("{}/fluree/{}", self.url, path))
+            .post(format!("{}/fluree/{}", self.url, path))
             .headers(request_headers)
             .body(body)
             .send()
@@ -173,12 +173,12 @@ impl FlureeInstance {
         if let Some(auth) = self.api_key.clone() {
             request_headers.insert(
                 reqwest::header::AUTHORIZATION,
-                reqwest::header::HeaderValue::from_str(&format!("{}", &auth)).unwrap(),
+                reqwest::header::HeaderValue::from_str(&auth).unwrap(),
             );
         }
 
         self.client
-            .post(&format!("{}/fluree/query", self.url))
+            .post(format!("{}/fluree/query", self.url))
             .headers(request_headers)
             .body(body)
             .send()
@@ -195,7 +195,7 @@ impl FlureeInstance {
             );
         }
         self.client
-            .post(&format!("{}/multi-query", self.url))
+            .post(format!("{}/multi-query", self.url))
             .headers(request_headers)
             .body(SCHEMA_QUERY)
             .send()
@@ -212,7 +212,7 @@ impl FlureeInstance {
             );
         }
         self.client
-            .post(&format!("{}/query", self.url))
+            .post(format!("{}/query", self.url))
             .headers(request_headers.clone())
             .body(query)
             .send()
@@ -228,10 +228,10 @@ impl FlureeInstance {
                     println!("Response: {:?}", response.error_for_status_ref());
                     match self.api_key {
                         Some(_) => {
-                            final_result = Err(format!("The API Key you provided is not authorized to access this database. Please try again."));
+                            final_result = Err("The API Key you provided is not authorized to access this database. Please try again.".to_string());
                         }
                         None => {
-                            final_result = Err(format!("It appears you need to provide an API Key to access this database. Please try again."));
+                            final_result = Err("It appears you need to provide an API Key to access this database. Please try again.".to_string());
                         }
                     };
                     (true, false)
@@ -243,7 +243,7 @@ impl FlureeInstance {
                         url,
                         response.status()
                     ));
-                    (false, !self.api_key.is_some())
+                    (false, self.api_key.is_none())
                 }
             },
             Err(_) => {
@@ -405,7 +405,7 @@ impl Migrate for FlureeInstance {
         if !opt.print && opt.output.is_some() {
             std::fs::remove_dir_all(opt.output.clone().unwrap()).unwrap_or_else(|why| {
                 if why.kind() != std::io::ErrorKind::NotFound {
-                    panic!("Unable to remove existing output directory: {}", why);
+                    panic!("Unable to remove existing output directory: {why}");
                 }
             });
         }
@@ -475,9 +475,9 @@ impl Migrate for FlureeInstance {
             .collect::<Vec<String>>();
         let message = print_classes.join(", ");
         let full_message = if print_classes.len() > 3 {
-            format!("[{}...]", message)
-        } else if print_classes.len() > 0 {
-            format!("[{}]", message)
+            format!("[{message}...]")
+        } else if !print_classes.is_empty() {
+            format!("[{message}]")
         } else {
             "".to_string()
         };
@@ -512,15 +512,14 @@ impl Migrate for FlureeInstance {
                         let query = format!(
                             r#"{{
                     "select": ["*"],
-                    "from": "{}",
+                    "from": "{class_name}",
                     "opts": {{
                         "compact": true,
                         "limit": 5000,
                         "fuel": 9999999999,
-                        "offset": {}
+                        "offset": {offset}
                     }}
                 }}"#,
-                            class_name, offset
                         );
                         let response_result = source_instance.issue_data_query(query).await;
                         let response = response_result.unwrap().text().await.unwrap();
@@ -528,9 +527,9 @@ impl Migrate for FlureeInstance {
                         let response: Value = match serde_json::from_str(&response) {
                             Ok(response) => response,
                             Err(e) => {
-                                pretty_print(&format!("[ERROR] {}", e), Color::DarkRed, true);
+                                pretty_print(&format!("[ERROR] {e}"), Color::DarkRed, true);
                                 pretty_print(
-                                    &format!("Fluree Response: {}", response),
+                                    &format!("Fluree Response: {response}"),
                                     Color::DarkRed,
                                     true,
                                 );
@@ -561,12 +560,12 @@ impl Migrate for FlureeInstance {
 
                         drop(entity_map_guard);
 
-                        if response.len() == 0 || all_entities_already_exist {
+                        if response.is_empty() || all_entities_already_exist {
                             temp_file
                                 .lock()
                                 .await
                                 .write(&class_name, &results)
-                                .expect(format!("Issue writing file for {}", class_name).as_str());
+                                .unwrap_or_else(|_| panic!("Issue writing file for {class_name}"));
                             results.clear();
                             break;
                         }
@@ -579,13 +578,13 @@ impl Migrate for FlureeInstance {
                         let results_length = results.len();
 
                         if results_length > 12_500 {
-                            temp_file.lock().await.write(&class_name, &results).expect(
-                                format!(
-                                    "Issue writing file for {} at offset {}",
-                                    class_name, offset
-                                )
-                                .as_str(),
-                            );
+                            temp_file
+                                .lock()
+                                .await
+                                .write(&class_name, &results)
+                                .unwrap_or_else(|_| {
+                                    panic!("Issue writing file for {class_name} at offset {offset}")
+                                });
                             results.clear();
                         }
 
@@ -607,9 +606,9 @@ impl Migrate for FlureeInstance {
                         .collect::<Vec<String>>();
                     let message = print_classes.join(", ");
                     let full_message = if print_classes.len() > 3 {
-                        format!("[{}...]", message)
-                    } else if print_classes.len() > 0 {
-                        format!("[{}]", message)
+                        format!("[{message}...]")
+                    } else if !print_classes.is_empty() {
+                        format!("[{message}]")
                     } else {
                         "".to_string()
                     };
@@ -639,7 +638,7 @@ impl Migrate for FlureeInstance {
         opt.pb.reset();
         opt.pb.inc_length(files.len() as u64);
         opt.pb.enable_steady_tick(Duration::from_millis(400));
-        opt.pb.set_message(format!("{:3}%", 100 * 1 / files.len()));
+        opt.pb.set_message(format!("{:3}%", 100 / files.len()));
         opt.pb.set_style(
             ProgressStyle::with_template(
                 // note that bar size is fixed unlike cargo which is dynamic
@@ -662,7 +661,7 @@ impl Migrate for FlureeInstance {
                 .set_message(format!("{:3}%", 100 * (index + 1) / files.len()));
             result_size += file.metadata().expect("Could not get metadata").len();
 
-            let file_bytes = std::fs::read(&file).expect("Could not read file");
+            let file_bytes = std::fs::read(file).expect("Could not read file");
             let file_string = String::from_utf8(file_bytes).expect("Could not convert to string");
             let results: Vec<Value> =
                 serde_json::from_str(&file_string).expect("Could not parse JSON");
@@ -684,7 +683,7 @@ impl Migrate for FlureeInstance {
 
                 let class_name = match parser.classes.get(&orig_class_name) {
                     Some(class) => class.id.to_owned(),
-                    None => panic!("Could not find class {}", orig_class_name),
+                    None => panic!("Could not find class {orig_class_name}"),
                 };
 
                 parsed_result.insert("@type".to_string(), serde_json::json!(&class_name));
@@ -693,7 +692,7 @@ impl Migrate for FlureeInstance {
                         let key = canonical_property.id.to_owned();
                         let shacl_shape = parser.shacl_shapes.get(&class_name).unwrap();
                         let shacl_properties = &shacl_shape.property;
-                        let is_datetime = match shacl_properties.iter().find(|&x| {
+                        let is_datetime = shacl_properties.iter().any(|x| {
                             let shacl_path = x.path.get("@id").unwrap();
                             let y = "xsd:dateTime";
                             if x.datatype.is_none() {
@@ -701,24 +700,19 @@ impl Migrate for FlureeInstance {
                             }
                             shacl_path == &key
                                 && x.datatype.clone().unwrap().get("@id").unwrap() == y
-                        }) {
-                            Some(_) => true,
-                            None => false,
-                        };
+                        });
                         let value = match is_datetime {
                             true => json!(instant_to_iso_string(value.as_i64().unwrap())),
                             false => value.to_owned(),
                         };
-                        let ref_type = match shacl_properties.iter().find(|&x| {
-                            let shacl_path = x.path.get("@id").unwrap();
-                            let shacl_class = x.class.is_some();
-                            (shacl_path == &key) && shacl_class
-                        }) {
-                            Some(x) => {
-                                Some(x.class.clone().unwrap().get("@id").unwrap().to_string())
-                            }
-                            None => None,
-                        };
+                        let ref_type = shacl_properties
+                            .iter()
+                            .find(|&x| {
+                                let shacl_path = x.path.get("@id").unwrap();
+                                let shacl_class = x.class.is_some();
+                                (shacl_path == &key) && shacl_class
+                            })
+                            .map(|x| x.class.clone().unwrap().get("@id").unwrap().to_string());
                         parsed_result.insert(key, represent_fluree_value(&value, ref_type));
                     }
                 }
@@ -738,7 +732,7 @@ impl Migrate for FlureeInstance {
             if result_size > 2_500_000 {
                 target_instance = shared_opt
                     .write_or_print(
-                        format!("{}_data.jsonld", file_num),
+                        format!("{file_num}_data.jsonld"),
                         serde_json::to_string_pretty(&data_results_map).unwrap(),
                         target_instance,
                     )
@@ -760,7 +754,7 @@ impl Migrate for FlureeInstance {
 
         let _ = shared_opt
             .write_or_print(
-                format!("{}_data.jsonld", file_num),
+                format!("{file_num}_data.jsonld"),
                 serde_json::to_string_pretty(&data_results_map).unwrap(),
                 target_instance,
             )
@@ -774,7 +768,7 @@ impl Migrate for FlureeInstance {
         // };
 
         let finish_line = match (output, target) {
-            (_, Some(target)) => format!("to Target Ledger [{}] ", target),
+            (_, Some(target)) => format!("to Target Ledger [{target}] "),
             (output, _) => match output {
                 Some(output) => format!("to {}/ ", output.to_str().unwrap()),
                 None => "".to_string(),
